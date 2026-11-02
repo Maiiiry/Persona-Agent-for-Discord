@@ -32,7 +32,7 @@ kiwisolver==1.5.1
 multidict==7.1.0
 packaging==26.3
 propcache==0.5.4
-pyasn1==0.6.4
+pyasn1==0.6.5
 pyasn1-modules==0.4.2
 pycparser==3.11
 pydantic==2.14.1
