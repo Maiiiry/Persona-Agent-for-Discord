@@ -126,9 +126,13 @@ class GroundingToggleButton(ui.Button):
         hub: "FunctionsView" = self.view  # type: ignore[assignment]
         begin_panel_operation(hub, interaction)
         await interaction.response.defer(ephemeral=True)
+        if not await hub.ensure_settings_current(interaction):
+            return
         hub.guild_settings.grounding_enabled = not hub.guild_settings.grounding_enabled
         # このトグルは確定操作が無く押した瞬間に反映されるため、その場で保存する
         await hub.guild_settings.persist()
+        if not await hub.ensure_settings_current(interaction):
+            return
 
         # ボタンの表示（ON/OFF）を更新するために View を再構築
         hub.refresh_items()

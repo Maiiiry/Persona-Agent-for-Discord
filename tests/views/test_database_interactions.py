@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-import discord
 from persona_bot.core.app_state import GuildSettings
 from persona_bot.services.stats_service import StatsService
 from persona_bot.views.auto_topic_view import AutoTopicView, AutoTopicConfirmButton
@@ -62,7 +61,7 @@ class DatabaseInteractionTests(unittest.IsolatedAsyncioTestCase):
                     button = next(item for item in view.children if isinstance(item, ReminderCancelSelect))
                     button._values = ["1"]
                 else:
-                    view = discord.ui.View()
+                    view = PanelView(timeout_notice="架空の時間切れ")
                     view.guild_settings = settings
                     view.refresh_items = Mock()
                     view.build_preview = Mock(return_value="架空のパネル")

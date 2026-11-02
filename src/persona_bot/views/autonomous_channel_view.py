@@ -139,6 +139,8 @@ class AutonomousChannelConfirmButton(ui.Button):
             await edit_panel_message(interaction, deferred=True, content=NOT_ADMIN_NOTICE, view=None)
             return
 
+        if not await view.ensure_settings_current(interaction):
+            return
         view.guild_settings.autonomous_stage_channel_id = view.temp_stage_channel_id
         view.guild_settings.autonomous_voice_channel_id = view.temp_voice_channel_id
         # 開始に失敗し続けたときの待ち時間（最長4時間）も解除する。使える配信先へ
@@ -147,6 +149,8 @@ class AutonomousChannelConfirmButton(ui.Button):
         view.guild_settings.autonomous_start_retry_at = None
         view.guild_settings.autonomous_start_failures = 0
         await view.guild_settings.persist()
+        if not await view.ensure_settings_current(interaction):
+            return
 
         await edit_panel_message(interaction, deferred=True, content=view.build_preview(confirmed=True), view=None)
 

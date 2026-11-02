@@ -259,6 +259,8 @@ Discordの参加サーバー一覧は`limit=200`・`after`で最大50ページ�
 
 ### ギルド単位の設定 (`app_state.py`)
 
+退出時は `forget_guild()` が旧 `GuildSettings` を無効にする。`PanelView.ensure_settings_current()` でパネル受付時と設定更新の非同期待機後に確認し、古いパネルには `/functions` での開き直しを案内する。`persist()` もロック取得後に無効な設定を拒否する。保存ロックは同じサーバーの退出前後で共有し、再参加時の復元は開始済みの旧保存が完了するまで待つ。ロックの索引は弱参照とし、過去のサーバーIDを溜めない（#342）。
+
 `on_guild_remove` は `guild_lifecycle.remove_guild_state` へ委譲し、自律配信の停止完了後に、そのギルドの設定・ウェルカム投稿済み記録・ボイス保護をメモリから外す。停止の例外やキャンセルでもキャッシュを回収し、他のギルド・DMとDB上の保存済み設定は保持する。
 
 保存済みの自発会話間隔は`AUTO_TOPIC_INTERVAL_CHOICES`にある整数だけを復元し、`bool`や選択肢外は既定値へ戻す。

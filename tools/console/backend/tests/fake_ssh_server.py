@@ -136,15 +136,17 @@ class FakeRepo:
         if command == "git rev-parse --abbrev-ref HEAD && git rev-parse HEAD && git status --porcelain --untracked-files=no | wc -l":
             return f"{self.branch}\n{self.head}\n{self.dirty}\n", "", 0
         fetch = re.fullmatch(
-            r"git fetch --quiet origin (\S+) && git rev-parse origin/\1"
-            r" && git rev-list --count HEAD\.\.origin/\1 && git rev-list --count origin/\1\.\.HEAD",
+            r"git fetch --quiet origin \+refs/heads/(\S+):refs/remotes/origin/\1"
+            r" && git rev-parse refs/remotes/origin/\1"
+            r" && git rev-list --count HEAD\.\.refs/remotes/origin/\1"
+            r" && git rev-list --count refs/remotes/origin/\1\.\.HEAD",
             command,
         )
         if fetch:
             if self.fetch_fails or fetch.group(1) != self.branch:
                 return "", f"fatal: couldn't find remote ref {fetch.group(1)}\n", 128
             return f"{self.origin}\n{len(self.history) - 1 - self.head_index}\n0\n", "", 0
-        if re.fullmatch(r"git merge --ff-only origin/\S+ && git rev-parse HEAD", command):
+        if re.fullmatch(r"git merge --ff-only refs/remotes/origin/\S+ && git rev-parse HEAD", command):
             before = self.head
             self.head_index = len(self.history) - 1
             return f"Updating {before[:7]}..{self.head[:7]}\nFast-forward\n{self.head}\n", "", 0
