@@ -222,7 +222,7 @@ class DeployTest(unittest.IsolatedAsyncioTestCase):
         health = self.step(record, "health")
         self.assertIn(rc.LOGIN_SUCCESS_TEXT, health.checks[0].detail)
         # 実行したコマンドと出力が画面に出せる形で残る
-        self.assertTrue(self.step(record, "pull").commands[0].endswith("git merge --ff-only origin/main && git rev-parse HEAD"))
+        self.assertTrue(self.step(record, "pull").commands[0].endswith("git merge --ff-only refs/remotes/origin/main && git rev-parse HEAD"))
         self.assertIn("Fast-forward", self.step(record, "pull").output)
         self.assertEqual(self.sent("-m pip install"), [])  # requirements.txt は変わっていない
 

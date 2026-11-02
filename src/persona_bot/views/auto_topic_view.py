@@ -171,6 +171,8 @@ class AutoTopicConfirmButton(ui.Button):
         view: "AutoTopicView" = self.view  # type: ignore[assignment]
         begin_panel_operation(view, interaction)
         await interaction.response.defer(ephemeral=True)
+        if not await view.ensure_settings_current(interaction):
+            return
 
         # 一時選択値をこのサーバー（ギルド）専用の設定に反映し、DB へ保存する。
         # 自律行動を OFF にした場合、進行中の配信は見回り（autonomous_loop）が
@@ -187,6 +189,8 @@ class AutoTopicConfirmButton(ui.Button):
         view.guild_settings.autonomous_start_failures = 0
 
         await view.guild_settings.persist()
+        if not await view.ensure_settings_current(interaction):
+            return
 
         confirmed_text = _build_status_text(
             view.guild_settings,

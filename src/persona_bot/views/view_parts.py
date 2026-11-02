@@ -11,6 +11,7 @@ from discord import ui
 
 from persona_bot.config.constants import DISCORD_SELECT_LABEL_MAX_LENGTH, VIEW_TIMEOUT_SECONDS
 from persona_bot.core.background import TaskOwner, _current_owner
+from persona_bot.core.app_state import GuildSettings
 from persona_bot.utils.discord_helpers import reject_blocked_interaction
 
 
@@ -218,9 +219,24 @@ class PanelView(ui.View):
             return False
         if self.blocked_user_check is not None and await reject_blocked_interaction(interaction, self.blocked_user_check):
             return False
+        if not await self.ensure_settings_current(interaction):
+            return False
         # グラフ等の別メッセージへの操作では、保留中のパネル更新を失効させない。
         # 画面を更新するコールバックだけが、待機前に操作世代を確保する。
         return not self.is_finished() and self._panel_state.current is self
+
+    async def ensure_settings_current(self, interaction: discord.Interaction) -> bool:
+        """退出前の設定を使う操作は、受付時と非同期待機後に拒否する。"""
+        settings = getattr(self, "guild_settings", None)
+        if not isinstance(settings, GuildSettings) or settings.is_active:
+            return True
+        await edit_panel_message(
+            interaction,
+            content="このパネルはサーバー退出により無効になりました。再度 /functions を実行して開き直してください。",
+            view=None,
+            source=self,
+        )
+        return False
 
     async def on_error(
         self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[Any], /

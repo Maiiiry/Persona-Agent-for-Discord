@@ -101,6 +101,7 @@ class GuildSettings:
     # persist() の直列化用。並行した保存の書き込み順が入れ替わって、
     # 古い値で新しい値を上書きしないようにする（persist の説明を参照）。
     _persist_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
+    _active: bool = field(default=True, init=False, repr=False, compare=False)
 
     # --- 自発的な会話 ---
     # 機能の有効/無効と無会話しきい値（時間）。/functions → 💬 自発会話 で変更する。
@@ -142,6 +143,11 @@ class GuildSettings:
     # 同じ記念日に同じサーバーで二重投稿しないための記録。DB にも保存され、
     # 起動時に復元される（当日に再起動しても同じお祝いを繰り返さないため）。
     anniversary_posted_dates: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def is_active(self) -> bool:
+        """退出前の設定を保持したパネルから、古い値を再利用させない。"""
+        return self._active
 
     def snapshot_response(self) -> ResponseSettings:
         """非同期の処理を始める前に、今回の応答に使う設定を確定する。"""
@@ -233,6 +239,9 @@ class GuildSettings:
         if self._db is None:
             return
         async with self._persist_lock:
+            # ロック待ち中に退出した保存も、新しい設定を上書きさせない。
+            if not self.is_active:
+                return
             try:
                 await run_in_thread(
                     self._db.guild_settings_save,
@@ -319,6 +328,17 @@ class BotState:
     _guild_loads: WeakValueDictionary[int, _GuildSettingsLoad] = field(
         default_factory=WeakValueDictionary, repr=False, compare=False,
     )
+    # 退出前の保存と再参加後の復元・保存も直列化する。参照がなくなれば回収される。
+    _guild_persist_locks: WeakValueDictionary[int, asyncio.Lock] = field(
+        default_factory=WeakValueDictionary, repr=False, compare=False,
+    )
+
+    def _guild_persist_lock(self, guild_id: int) -> asyncio.Lock:
+        lock = self._guild_persist_locks.get(guild_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._guild_persist_locks[guild_id] = lock
+        return lock
 
     def get_guild(self, guild_id: int | None) -> GuildSettings:
         """復元済みの設定を同期的に返す。DBを使わない場合は既定値で生成する。
@@ -333,7 +353,7 @@ class BotState:
         if settings is None:
             if self._db is not None:
                 raise RuntimeError("未復元のサーバー設定は get_guild_async() で取得してください。")
-            settings = GuildSettings()
+            settings = GuildSettings(_persist_lock=self._guild_persist_lock(guild_id))
             settings.attach(self._db, guild_id)
             self.guild_settings[guild_id] = settings
         return settings
@@ -361,10 +381,14 @@ class BotState:
                 raise RuntimeError("サーバー退出により設定の復元を中止しました。")
             settings = self.guild_settings.get(guild_id)
             if settings is None:
+                persist_lock = self._guild_persist_lock(guild_id)
+                async with persist_lock:
+                    # 退出前に始まった保存だけを待つ。旧世代の読込は再参加を待たせない。
+                    pass
                 values, posted = await run_in_thread(self._db.guild_state_load, guild_id)
                 if not loading.valid:
                     raise RuntimeError("サーバー退出により設定の復元を中止しました。")
-                settings = GuildSettings()
+                settings = GuildSettings(_persist_lock=persist_lock)
                 settings.apply_persisted(values)
                 settings.anniversary_posted_dates.update(posted)
                 settings.attach(self._db, guild_id)
@@ -373,7 +397,9 @@ class BotState:
 
     def forget_guild(self, guild_id: int) -> None:
         """退出したサーバーの一時設定と、待機中の古い読込結果を無効にする。"""
-        self.guild_settings.pop(guild_id, None)
+        settings = self.guild_settings.pop(guild_id, None)
+        if settings is not None:
+            settings._active = False
         loading = self._guild_loads.pop(guild_id, None)
         if loading is not None:
             loading.valid = False
@@ -412,7 +438,7 @@ class BotState:
             return self.dm_settings
         settings = self.guild_settings.get(guild_key)
         if settings is None:
-            settings = GuildSettings()
+            settings = GuildSettings(_persist_lock=self._guild_persist_lock(guild_key))
             settings.attach(self._db, guild_key)
             self.guild_settings[guild_key] = settings
         return settings

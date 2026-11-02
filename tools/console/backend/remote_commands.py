@@ -162,10 +162,13 @@ def deploy_state_command(bot_dir: str) -> str:
 
 def deploy_fetch_command(bot_dir: str, branch: str) -> str:
     """リモートの最新を取り寄せ、取り込む先のコミット / 新しいコミットの数 / サーバーにだけあるコミットの数を出す。"""
-    target = f"{DEPLOY_REMOTE}/{check_branch(branch)}"
+    branch = check_branch(branch)
+    target = f"refs/remotes/{DEPLOY_REMOTE}/{branch}"
+    # single-branch clone の追跡範囲外でも、判定・取り込みに使う参照を更新する。
+    refspec = f"+refs/heads/{branch}:{target}"
     return _in_bot_dir(
         bot_dir,
-        f"git fetch --quiet {DEPLOY_REMOTE} {branch}"
+        f"git fetch --quiet {DEPLOY_REMOTE} {refspec}"
         f" && git rev-parse {target}"
         f" && git rev-list --count HEAD..{target}"
         f" && git rev-list --count {target}..HEAD",
@@ -174,7 +177,7 @@ def deploy_fetch_command(bot_dir: str, branch: str) -> str:
 
 def deploy_merge_command(bot_dir: str, branch: str) -> str:
     """早送りだけで取り込む（git pull --ff-only と同じ）。最後の行に取り込んだ後のコミットを出す。"""
-    return _in_bot_dir(bot_dir, f"git merge --ff-only {DEPLOY_REMOTE}/{check_branch(branch)} && git rev-parse HEAD")
+    return _in_bot_dir(bot_dir, f"git merge --ff-only refs/remotes/{DEPLOY_REMOTE}/{check_branch(branch)} && git rev-parse HEAD")
 
 
 def deploy_log_command(bot_dir: str, before: str, after: str) -> str:

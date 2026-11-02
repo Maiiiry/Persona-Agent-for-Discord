@@ -189,10 +189,14 @@ class ConfirmButton(ui.Button):
             return
 
         # 一時選択値をこのサーバー（ギルド）専用の設定に反映し、DB へ保存する
+        if not await view.ensure_settings_current(interaction):
+            return
         view.guild_settings.current_prompt_file = view.temp_persona
         view.guild_settings.current_model_name = view.temp_model
         view.guild_settings.current_respond_mode = view.temp_respond_mode
         await view.guild_settings.persist()
+        if not await view.ensure_settings_current(interaction):
+            return
 
         confirmed_text = _build_status_text(
             view.temp_persona,
