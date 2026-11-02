@@ -12,7 +12,7 @@ from persona_bot.utils.discord_helpers import is_administrator, is_bot_owner, is
 from persona_bot.services.gemini_service import GeminiService
 from persona_bot.views.help_view import HelpView, resolve_bot_name
 from persona_bot.services.ng_word_service import NgWordFilter
-from persona_bot.services.reminder_service import ReminderService
+from persona_bot.services.reminder_service import ReminderService, ReminderStorageError
 from persona_bot.views.reminder_view import ReminderView
 from persona_bot.views.settings_view import SettingsView
 from persona_bot.views.stats_privacy_view import StatsPrivacyView
@@ -215,7 +215,16 @@ class ReminderButton(ui.Button):
 
         await interaction.response.defer(ephemeral=True)
         viewer_id = str(interaction.user.id)
-        records = await hub.reminders.list_pending(viewer_id)
+        try:
+            records = await hub.reminders.list_pending(viewer_id)
+        except ReminderStorageError:
+            notice = (
+                "⚠️ リマインダーの一覧を取得できませんでした。時間をおいて「⏰ リマインダー」を押してください。\n"
+                "パネルが時間切れの場合は /functions から開き直してください。"
+            )
+            if not await edit_panel_message(interaction, deferred=True, content=notice, view=hub):
+                await interaction.followup.send(notice, ephemeral=True)
+            return
         reminder_view = ReminderView(hub.reminders, records, viewer_id, make_hub=hub.clone)
         # 同じ（エフェメラルな）メッセージをリマインダーパネルに差し替える
         await swap_panel(interaction, hub, reminder_view, reminder_view.build_preview())

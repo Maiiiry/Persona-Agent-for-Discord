@@ -72,7 +72,12 @@ class StatsPrivacyConfirmButton(ui.Button):
         opted_out = not view.temp_collect_enabled
         saved = await view.stats.set_opt_out(view.viewer_id, view.viewer_name, opted_out)
 
-        if opted_out:
+        if not saved:
+            result = (
+                "⚠️ 統計収集の設定を保存できませんでした。設定は変更されていません。\n"
+                "時間をおいて /functions → 🔒 統計プライバシー から再度お試しください。"
+            )
+        elif opted_out:
             result = (
                 "🔕 統計収集を停止しました。以降のあなたの発言は記録されません。\n"
                 "※ すでに溜まっているデータは残っています（消したい場合は"
@@ -80,10 +85,6 @@ class StatsPrivacyConfirmButton(ui.Button):
             )
         else:
             result = "✅ 統計収集を再開しました。以降のあなたの発言が記録されます。"
-        if not saved:
-            # 設定はメモリ上には反映済みだが、再起動で失われる可能性があるため隠さず伝える。
-            result += "\n⚠️ ただし設定を保存できませんでした。ボットの再起動で元に戻る可能性があります。"
-
         shown = await edit_panel_message(interaction, deferred=True, content=result, view=None)
         if not shown and not saved:
             await interaction.followup.send(result, ephemeral=True)

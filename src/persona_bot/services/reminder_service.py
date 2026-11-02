@@ -44,6 +44,11 @@ from persona_bot.utils.normalization import normalize_recurrence
 
 logger = logging.getLogger(__name__)
 
+
+class ReminderStorageError(Exception):
+    """リマインダーのDB操作が失敗した。正常な空一覧・対象なしとは区別する。"""
+
+
 # LLM が返す日時のゆらぎを吸収するため、複数の形式を順に試す。
 _AT_FORMATS = (
     "%Y-%m-%d %H:%M",
@@ -342,22 +347,25 @@ class ReminderService:
     # ---- 一覧・取り消し（/functions の ⏰ リマインダーパネルから使う） ----------
 
     async def list_pending(self, user_id: str) -> list[dict[str, Any]]:
-        """指定ユーザーの未通知リマインダーを、通知が近い順で返す。"""
+        """未通知一覧を返す。DB障害はReminderStorageErrorで呼出元へ伝える。"""
         try:
             return await run_in_thread(self._db.reminder_list_pending, str(user_id))
         except Exception as error:
             logger.error("リマインダー: 一覧の取得に失敗しました。", exc_info=error)
-            return []
+            raise ReminderStorageError("リマインダーの一覧を取得できませんでした。") from error
 
     async def cancel(self, reminder_id: int, user_id: str) -> dict[str, Any] | None:
-        """本人の系列を取り消す。送信開始後なら今回の送信終了を待って次回分を止める。"""
+        """本人の系列を取り消す。対象なしはNone、DB障害はReminderStorageError。
+
+        送信開始後なら今回の送信終了を待って次回分を止める。
+        """
         try:
             reminder_id = int(reminder_id)
             async with self._delivery_lock(reminder_id):
                 return await run_in_thread(self._db.reminder_cancel, reminder_id, str(user_id))
         except Exception as error:
             logger.error("リマインダー: 取り消しに失敗しました。", exc_info=error)
-            return None
+            raise ReminderStorageError("リマインダーを取り消せませんでした。") from error
 
     def describe(self, record: dict[str, Any]) -> str:
         """リマインダー1件を「日時 — 本文（繰り返し）」の1行表記にする（一覧表示用）。"""
