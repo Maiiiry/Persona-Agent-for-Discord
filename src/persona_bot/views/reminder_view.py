@@ -2,7 +2,7 @@ import discord
 from discord import ui
 
 from persona_bot.config.constants import DISCORD_SELECT_MAX_OPTIONS, REMINDER_PANEL_MAX_LENGTH
-from persona_bot.services.reminder_service import ReminderService
+from persona_bot.services.reminder_service import ReminderService, ReminderStorageError
 from persona_bot.views.view_parts import (
     begin_panel_operation, edit_panel_message, BackButton,
     HubFactory, PanelView, select_option_text,
@@ -64,7 +64,17 @@ class ReminderCancelSelect(ui.Select):
         reminder_id = int(self.values[0])
 
         # 取り消しは SQL 側でも user_id で絞るため、他人のものは取り消せない
-        canceled = await view.service.cancel(reminder_id, view.viewer_id)
+        try:
+            canceled = await view.service.cancel(reminder_id, view.viewer_id)
+        except ReminderStorageError:
+            # DB障害を対象なしと扱わず、同じ選択肢から再試行できるようにする。
+            notice = (
+                "⚠️ リマインダーを取り消せませんでした。時間をおいて同じ予定を選び直してください。\n"
+                "パネルが時間切れの場合は /functions → ⏰ リマインダー から開き直してください。"
+            )
+            if not await edit_panel_message(interaction, deferred=True, content=notice, view=view):
+                await interaction.followup.send(notice, ephemeral=True)
+            return
         if canceled is None:
             await edit_panel_message(interaction, deferred=True,
                 content="このリマインダーは既に通知済みか、取り消されています。", view=None
