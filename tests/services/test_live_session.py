@@ -297,6 +297,93 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(connect.configs[1].tools)
         self.assertIsNone(connect.configs[2].tools)
         self.assertEqual(self.closed_reasons, [])
+        self.assertEqual(self.sleeps, [constants.LIVE_RECONNECT_BACKOFF_SECONDS[0]])
+
+    async def test_search_fallback_on_immediate_reconnect_does_not_wait(self):
+        rejected = errors.APIError(1011, {"message": "架空の quota 超過"})
+        live, connect = self.make([rejected, FakeSession([])])
+        live._go_away = True
+        with self.assertLogs("persona_bot.services.live_session", level="WARNING"):
+            self.assertTrue(await live._reconnect())
+        self.assertEqual(self.sleeps, [])
+        self.assertEqual(len(connect.configs), 2)
+        self.assertIsNotNone(connect.configs[0].tools)
+        self.assertIsNone(connect.configs[1].tools)
+
+    async def test_search_fallback_on_last_reconnect_attempt_is_tried(self):
+        failed = errors.ServerError(503, {"message": "架空の障害"})
+        rejected = errors.ClientError(429, {"message": "架空の上限"})
+        outcomes = [failed] * (constants.LIVE_RECONNECT_MAX_ATTEMPTS - 1) + [rejected, FakeSession([])]
+        live, connect = self.make(outcomes)
+        with self.assertLogs("persona_bot.services.live_session", level="WARNING"):
+            self.assertTrue(await live._reconnect())
+        self.assertEqual(len(connect.configs), constants.LIVE_RECONNECT_MAX_ATTEMPTS + 1)
+        self.assertIsNone(connect.configs[-1].tools)
+        self.assertEqual(len(self.sleeps), constants.LIVE_RECONNECT_MAX_ATTEMPTS)
+        self.assertEqual(self.closed_reasons, [])
+
+    async def test_quota_after_reconnect_search_fallback_ends_without_more_attempts(self):
+        rejected = errors.ClientError(429, {"message": "架空の上限"})
+        live, connect = self.make([rejected, rejected])
+        with self.assertLogs("persona_bot.services.live_session", level="WARNING"):
+            self.assertFalse(await live._reconnect())
+        self.assertEqual(len(connect.configs), 2)
+        self.assertEqual(self.closed_reasons, [CLOSED_QUOTA])
+        self.assertEqual(len(self.sleeps), 1)
+
+    async def test_pump_does_not_repeat_an_empty_stream(self):
+        class EmptySession:
+            calls = 0
+
+            async def receive(self):
+                self.calls += 1
+                if self.calls > 1:
+                    raise AssertionError("閉じたストリームを再受信しました。")
+                if False:
+                    yield
+
+        live, _connect = self.make([])
+        empty = EmptySession()
+        live._session = empty
+        self.assertIsNone(await live._pump())
+        self.assertEqual(empty.calls, 1)
+
+    async def test_restart_fresh_handles_a_clean_receive_end(self):
+        class CleanCloseSession(FakeSession):
+            calls = 0
+
+            async def receive(self):
+                self.calls += 1
+                if self.calls > 1:
+                    raise AssertionError("閉じたストリームを再受信しました。")
+                await self.closed.wait()
+                if False:
+                    yield
+
+        first = CleanCloseSession([])
+        second = FakeSession([])
+        live, connect = self.make([first, second])
+        await live.start()
+        await self.wait_until(lambda: first.calls == 1)
+        await live.restart_fresh()
+        await self.wait_until(lambda: self.reconnected == 1)
+        self.assertEqual(first.calls, 1)
+        self.assertIs(connect.sessions[-1], second)
+        self.assertEqual(self.sleeps, [])
+
+    async def test_pump_continues_normal_turns_but_stops_after_session_replacement(self):
+        first = FakeSession([message(server_content="1回目"), message(server_content="2回目")])
+        live, _connect = self.make([])
+        live._session = first
+
+        async def replace_after_second(received):
+            self.messages.append(received)
+            if len(self.messages) == 2:
+                live._session = FakeSession([])
+
+        live._on_message = replace_after_second
+        self.assertIsNone(await asyncio.wait_for(live._pump(), timeout=2))
+        self.assertEqual([item.server_content for item in self.messages], ["1回目", "2回目"])
 
     async def test_close_stops_without_reconnecting(self):
         first = FakeSession([])

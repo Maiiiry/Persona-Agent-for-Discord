@@ -1,6 +1,7 @@
 """/join・/leave と音声会話（Gemini Live。#268）の連携を確かめる。"""
 
 from pathlib import Path
+import asyncio
 import sys
 from types import SimpleNamespace
 import unittest
@@ -51,7 +52,7 @@ class JoinLiveVoiceTests(unittest.IsolatedAsyncioTestCase):
         self.autonomous = SimpleNamespace(stop_session=AsyncMock(return_value=False))
         self.voice_guard = Mock(name="voice_guard")
         self.live = SimpleNamespace(
-            reserve=Mock(return_value=True), release_reservation=Mock(), start=AsyncMock(),
+            reserve=Mock(return_value=object()), release_reservation=Mock(), start=AsyncMock(),
             stop=AsyncMock(return_value=False), get=Mock(return_value=None),
         )
         self.coordinator = VoiceCommandCoordinator()
@@ -94,9 +95,10 @@ class JoinLiveVoiceTests(unittest.IsolatedAsyncioTestCase):
         self.live.reserve.assert_called_with(1)
         self.live.start.assert_awaited_once_with(
             self.guild, self.created[0], self.channel, ANY, fallback_channel=self.interaction.channel,
+            reservation=self.live.reserve.return_value,
         )
         self.assertIn("同意して参加", reply)
-        self.live.release_reservation.assert_called_with(1)
+        self.live.release_reservation.assert_called_with(1, reservation=self.live.reserve.return_value)
 
     async def test_capacity_refuses_before_connecting(self):
         self.live.reserve.return_value = False
@@ -131,6 +133,60 @@ class JoinLiveVoiceTests(unittest.IsolatedAsyncioTestCase):
         self.live.start.assert_not_awaited()
         self.channel.connect.assert_not_awaited()
         self.assertIn("既に接続しています", reply)
+        self.live.reserve.assert_not_called()
+        voice_client.disconnect.assert_not_awaited()
+
+    async def test_capacity_disconnects_an_idle_reused_connection(self):
+        voice_client = FakeLiveVoiceClient(None, self.channel)
+        self.guild.voice_client = voice_client
+        self.live.reserve.return_value = None
+        self.assertEqual(await self.join(), NOTICE_LIVE_CAPACITY)
+        voice_client.disconnect.assert_awaited_once_with(force=True)
+        self.voice_guard.release.assert_called_once_with(1)
+        self.live.start.assert_not_awaited()
+        self.live.release_reservation.assert_not_called()
+
+    async def test_settings_failure_cleans_up_new_and_reused_connections(self):
+        for reuse in (False, True):
+            with self.subTest(reuse=reuse):
+                self.guild.voice_client = FakeLiveVoiceClient(None, self.channel) if reuse else None
+                self.live.release_reservation.reset_mock()
+                with patch.object(BotState, "get_guild_async", AsyncMock(side_effect=RuntimeError("架空のDB障害"))), \
+                        self.assertLogs("persona_bot.core.commands", level="ERROR"):
+                    self.assertEqual(await self.join(), NOTICE_LIVE_UNAVAILABLE)
+                self.guild.voice_client.disconnect.assert_awaited_once_with(force=True)
+                self.live.release_reservation.assert_called_with(1, reservation=self.live.reserve.return_value)
+                self.live.start.assert_not_awaited()
+
+    async def test_cancellation_cleans_up_settings_and_live_start(self):
+        for reuse in (False, True):
+            for phase in ("settings", "live"):
+                with self.subTest(reuse=reuse, phase=phase):
+                    self.guild.voice_client = FakeLiveVoiceClient(None, self.channel) if reuse else None
+                    self.live.release_reservation.reset_mock()
+                    entered, resume = asyncio.Event(), asyncio.Event()
+
+                    async def wait(*args, **kwargs):
+                        entered.set()
+                        await resume.wait()
+
+                    target = BotState if phase == "settings" else self.live
+                    attribute = "get_guild_async" if phase == "settings" else "start"
+                    with patch.object(target, attribute, AsyncMock(side_effect=wait)):
+                        task = asyncio.create_task(self.join())
+                        try:
+                            await asyncio.wait_for(entered.wait(), 2)
+                            task.cancel()
+                            with self.assertRaises(asyncio.CancelledError):
+                                await asyncio.wait_for(task, 2)
+                        finally:
+                            resume.set()
+                            if not task.done():
+                                task.cancel()
+                            await asyncio.gather(task, return_exceptions=True)
+                    self.guild.voice_client.disconnect.assert_awaited_once_with(force=True)
+                    self.voice_guard.release.assert_called_with(1)
+                    self.live.release_reservation.assert_called_with(1, reservation=self.live.reserve.return_value)
 
     async def test_conversation_for_another_channel_is_restarted_for_this_channel(self):
         """移された先で /join したら、元のチャンネル用の会話を使い回さず、このチャンネル用に始め直す。"""

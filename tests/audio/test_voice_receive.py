@@ -32,12 +32,13 @@ USER_ID = 777
 
 
 def encrypt_packet(payload: bytes, *, sequence: int = 1, extension: bytes | None = None,
-                   csrcs: int = 0, nonce: int = 5) -> bytes:
+                   csrcs: int = 0, nonce: int = 5, padding: bool = False,
+                   extension_words: int | None = None, key: bytes = KEY) -> bytes:
     """discord.py の _encrypt_aead_xchacha20_poly1305_rtpsize と同じ形でパケットを作る。
 
     受信では拡張ヘッダー（4バイト）が追加認証データ、拡張の本体が暗号文の先頭に入る。
     """
-    first = 0x80 | csrcs | (0x10 if extension is not None else 0)
+    first = 0x80 | csrcs | (0x10 if extension is not None else 0) | (0x20 if padding else 0)
     header = bytearray(12)
     header[0] = first
     header[1] = 0x78
@@ -45,11 +46,12 @@ def encrypt_packet(payload: bytes, *, sequence: int = 1, extension: bytes | None
     header += bytes(4 * csrcs)
     body = payload
     if extension is not None:
-        header += struct.pack(">HH", 0xBEDE, len(extension) // 4)
+        words = len(extension) // 4 if extension_words is None else extension_words
+        header += struct.pack(">HH", 0xBEDE, words)
         body = extension + payload
     nonce_bytes = bytearray(24)
     nonce_bytes[:4] = struct.pack(">I", nonce)
-    box = nacl.secret.Aead(KEY)
+    box = nacl.secret.Aead(key)
     return bytes(header) + box.encrypt(body, bytes(header), bytes(nonce_bytes)).ciphertext + bytes(nonce_bytes[:4])
 
 
@@ -81,6 +83,26 @@ class RtpTests(unittest.TestCase):
         packet = parse_rtp_packet(bytes(raw))
         with self.assertRaises(Exception):
             decrypt_transport(packet, nacl.secret.Aead(KEY))
+
+    def test_invalid_padding_lengths_are_rejected(self):
+        for payload in (b"", b"opus\x00", b"opus\x06"):
+            with self.subTest(payload=payload):
+                packet = parse_rtp_packet(encrypt_packet(payload, padding=True))
+                self.assertIsNone(decrypt_transport(packet, nacl.secret.Aead(KEY)))
+
+    def test_valid_padding_is_removed_after_extension(self):
+        for extension in (None, b"\x00" * 4):
+            with self.subTest(extension=extension):
+                raw = encrypt_packet(b"opus\x00\x02", extension=extension, padding=True)
+                self.assertEqual(decrypt_transport(parse_rtp_packet(raw), nacl.secret.Aead(KEY)), b"opus")
+
+    def test_extension_length_cannot_exceed_plaintext(self):
+        raw = encrypt_packet(b"opus", extension=b"", extension_words=2)
+        self.assertIsNone(decrypt_transport(parse_rtp_packet(raw), nacl.secret.Aead(KEY)))
+
+    def test_padding_cannot_consume_extension_bytes(self):
+        raw = encrypt_packet(b"opus\x06", extension=b"\x00" * 4, padding=True)
+        self.assertIsNone(decrypt_transport(parse_rtp_packet(raw), nacl.secret.Aead(KEY)))
 
     def test_rtcp_and_short_packets_are_ignored(self):
         rtcp = bytes([0x80, 200]) + bytes(30)
@@ -131,7 +153,9 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             dave_session=dave_session, dave_protocol_version=dave_version,
             add_socket_listener=Mock(), remove_socket_listener=Mock(),
         )
-        voice_client = SimpleNamespace(_connection=self.connection, user_id_for_ssrc={SSRC: USER_ID}.get)
+        voice_client = LiveVoiceClientTests.make_client(self)
+        voice_client._connection = self.connection
+        voice_client._ssrc_users = {SSRC: (USER_ID, object())}
         self.decoders: list[FakeDecoder] = []
 
         def factory():
@@ -163,9 +187,9 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         receiver = self.make_receiver()
         receiver.start()
         unknown = bytearray(encrypt_packet(b"opus"))
-        receiver._voice_client = SimpleNamespace(_connection=self.connection, user_id_for_ssrc={}.get)
+        receiver._voice_client._ssrc_users = {}
         receiver._on_packet(bytes(unknown))
-        receiver._voice_client = SimpleNamespace(_connection=self.connection, user_id_for_ssrc={SSRC: USER_ID}.get)
+        receiver._voice_client._ssrc_users = {SSRC: (USER_ID, object())}
         receiver._on_packet(encrypt_packet(b"opus", sequence=10))
         receiver._on_packet(encrypt_packet(b"old", sequence=9))
         receiver._on_packet(encrypt_packet(OPUS_SILENCE_FRAME, sequence=11))
@@ -182,6 +206,83 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertEqual(self.received, [])
         self.assertEqual(receiver.dropped_packets, 1)
+
+    async def test_malformed_rtp_payload_never_reaches_dave_or_opus(self):
+        session = SimpleNamespace(
+            ready=True, decrypt=Mock(return_value=b"opus"), can_passthrough=Mock(return_value=False),
+        )
+        receiver = self.make_receiver(dave_session=session, dave_version=1)
+        receiver.start()
+        receiver._on_packet(encrypt_packet(b"opus\x00", padding=True))
+        receiver._on_packet(encrypt_packet(b"opus", extension=b"", extension_words=2))
+        await asyncio.sleep(0)
+        self.assertEqual(receiver.dropped_packets, 2)
+        session.decrypt.assert_not_called()
+        self.assertEqual(self.decoders, [])
+
+    async def test_disconnect_and_same_speaker_rejoin_reset_sequence_and_decoder(self):
+        receiver = self.make_receiver()
+        receiver.start()
+        receiver._on_packet(encrypt_packet(b"before", sequence=40000))
+        await receiver._voice_client._handle_voice_ws_message(None, {"op": 13, "d": {"user_id": USER_ID}})
+        await receiver._voice_client._handle_voice_ws_message(
+            None, {"op": 5, "d": {"user_id": USER_ID, "ssrc": SSRC}},
+        )
+        receiver._on_packet(encrypt_packet(b"after", sequence=10000))
+        await asyncio.sleep(0)
+        self.assertEqual([decoder.decoded for decoder in self.decoders], [[b"before"], [b"after"]])
+        self.assertEqual(len(self.received), 2)
+
+    async def test_ssrc_reassignment_to_another_speaker_resets_sequence(self):
+        receiver = self.make_receiver()
+        receiver.start()
+        receiver._on_packet(encrypt_packet(b"before", sequence=40000))
+        await receiver._voice_client._handle_voice_ws_message(
+            None, {"op": 5, "d": {"user_id": USER_ID + 1, "ssrc": SSRC}},
+        )
+        receiver._on_packet(encrypt_packet(b"after", sequence=10000))
+        await asyncio.sleep(0)
+        self.assertEqual([decoder.decoded for decoder in self.decoders], [[b"before"], [b"after"]])
+        self.assertEqual([user_id for user_id, _pcm in self.received], [USER_ID, USER_ID + 1])
+
+    async def test_repeated_speaking_notification_preserves_sequence_filter(self):
+        receiver = self.make_receiver()
+        receiver.start()
+        receiver._on_packet(encrypt_packet(b"new", sequence=40000))
+        await receiver._voice_client._handle_voice_ws_message(
+            None, {"op": 5, "d": {"user_id": USER_ID, "ssrc": SSRC}},
+        )
+        receiver._on_packet(encrypt_packet(b"old", sequence=10000))
+        self.assertEqual([decoder.decoded for decoder in self.decoders], [[b"new"]])
+
+    async def test_voice_reconnect_resets_stream_even_with_the_same_key(self):
+        for op in (4, 9):
+            with self.subTest(op=op):
+                receiver = self.make_receiver()
+                receiver.start()
+                receiver._on_packet(encrypt_packet(b"before", sequence=40000))
+                await receiver._voice_client._handle_voice_ws_message(None, {"op": op, "d": {}})
+                receiver._on_packet(encrypt_packet(b"after", sequence=10000))
+                self.assertEqual([decoder.decoded for decoder in self.decoders], [[b"before"], [b"after"]])
+
+    async def test_new_voice_connection_forgets_old_speaker_assignments(self):
+        receiver = self.make_receiver()
+        receiver.start()
+        receiver._on_packet(encrypt_packet(b"before", sequence=40000))
+        await receiver._voice_client._handle_voice_ws_message(None, {"op": 2, "d": {}})
+        receiver._on_packet(encrypt_packet(b"unknown", sequence=10000))
+        self.assertIsNone(receiver._voice_client.user_id_for_ssrc(SSRC))
+        self.assertNotIn(SSRC, receiver._decoders)
+        self.assertEqual([decoder.decoded for decoder in self.decoders], [[b"before"]])
+
+    async def test_transport_key_change_resets_decoder_before_sequence_comparison(self):
+        receiver = self.make_receiver()
+        receiver.start()
+        receiver._on_packet(encrypt_packet(b"before", sequence=40000))
+        new_key = nacl.utils.random(nacl.secret.Aead.KEY_SIZE)
+        self.connection.secret_key = list(new_key)
+        receiver._on_packet(encrypt_packet(b"after", sequence=10000, key=new_key))
+        self.assertEqual([decoder.decoded for decoder in self.decoders], [[b"before"], [b"after"]])
 
     async def test_unsupported_mode_is_dropped(self):
         receiver = self.make_receiver()

@@ -326,11 +326,19 @@ class LiveSession:
         if session is None:
             return None
         try:
-            while not self._closing:
+            while not self._closing and not self._restart_requested and session is self._session:
+                received = False
                 async for message in session.receive():
+                    if self._closing or self._restart_requested or session is not self._session:
+                        return None
+                    received = True
                     await self._handle(message)
                     if self._go_away:
                         return None
+                # SDK は通常のターン完了でもイテレーションを終えるので、次のターンを受ける。
+                # 何も返さず閉じたストリームは再利用しない（空ループによる占有を防ぐ）。
+                if not received:
+                    return None
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -360,13 +368,20 @@ class LiveSession:
             if self._closing:
                 return False
             try:
-                await self._open()
+                try:
+                    await self._open()
+                except Exception as error:
+                    if not self._drop_search_on_quota(error):
+                        raise
+                    # 検索だけの超過は同じ試行内で退避する。最終試行でも音声を試し、待ちを増やさない。
+                    await self._close_current()
+                    if self._closing:
+                        return False
+                    await self._open()
             except asyncio.CancelledError:
                 raise
             except Exception as error:
                 await self._close_current()
-                if self._drop_search_on_quota(error):
-                    continue
                 if is_quota_error(error):
                     logger.warning("Gemini Live: 利用枠の上限に達したため、再接続を中止します。")
                     await self._on_closed(CLOSED_QUOTA)
