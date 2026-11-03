@@ -35,24 +35,27 @@ export function DataPage({
   const [error, setError] = useState<string | null>(null);
   // 中身を開いているテーブル。中身には会話や記憶が入るので、開くのは利用者が選んだときだけにする
   // （覚えておいて、ページを開いただけで取り寄せることはしない）
-  const [openTable, setOpenTable] = useState<string | null>(null);
+  const [openSelection, setOpenSelection] = useState<{ connectionKey: string; table: string } | null>(null);
   // 閉じる動きの間も、最後に開いていたテーブルの中身を残しておく
-  const [shownTable, setShownTable] = useState<string | null>(null);
+  const [shownSelection, setShownSelection] = useState<{ connectionKey: string; table: string } | null>(null);
+  // effect より先に子が取得を始めるため、描画時点で現在の接続の選択だけを渡す。
+  const openTable = openSelection?.connectionKey === connectionKey ? openSelection.table : null;
+  const shownTable = shownSelection?.connectionKey === connectionKey ? shownSelection.table : null;
   const privacy = usePrivacy();
   const requestId = useRef(0);
 
   // 接続先が変わったら閉じる（別のサーバーの中身を、選ばないうちに取り寄せない）
   // （閉じる動きの間に新しい接続先から取り寄せないよう、中身もすぐに外す）
   useEffect(() => {
-    setOpenTable(null);
-    setShownTable(null);
+    setOpenSelection(null);
+    setShownSelection(null);
   }, [connectionKey]);
 
   const selectTable = (name: string) => {
     const next = openTable === name ? null : name;
-    setOpenTable(next);
+    setOpenSelection(next ? { connectionKey, table: next } : null);
     if (next) {
-      setShownTable(next);
+      setShownSelection({ connectionKey, table: next });
       // 開いた中身のカードが見えるところまで送る（描画の後に。動きを減らす設定ならすぐに移る）
       requestAnimationFrame(() => {
         const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -60,7 +63,7 @@ export function DataPage({
       });
     }
   };
-  const closeTable = useCallback(() => setOpenTable(null), []);
+  const closeTable = useCallback(() => setOpenSelection(null), []);
 
   const load = useCallback(async () => {
     const current = ++requestId.current;
