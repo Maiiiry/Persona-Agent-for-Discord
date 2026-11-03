@@ -57,6 +57,9 @@ OPUS_SILENCE_FRAME = b"\xf8\xff\xfe"
 # 音声 WebSocket の op コード（discord.py の DiscordVoiceWebSocket と同じ値）。
 _OP_SPEAKING = 5
 _OP_CLIENT_DISCONNECT = 13
+_OP_READY = 2
+_OP_SESSION_DESCRIPTION = 4
+_OP_RESUMED = 9
 # 16bit の通番の比較で「古い」とみなす幅（ラップアラウンドを考慮する）。
 _SEQUENCE_HALF_RANGE = 0x8000
 
@@ -106,7 +109,7 @@ def parse_rtp_packet(data: bytes) -> RtpPacket | None:
     )
 
 
-def decrypt_transport(packet: RtpPacket, box: Any) -> bytes:
+def decrypt_transport(packet: RtpPacket, box: Any) -> bytes | None:
     """転送層の暗号を外し、RTP 拡張の本体とパディングを取り除いた Opus（または DAVE 暗号文）を返す。
 
     rtpsize では、拡張ヘッダー（4バイト）は追加認証データ、拡張の本体は暗号文の先頭に入る。
@@ -115,9 +118,13 @@ def decrypt_transport(packet: RtpPacket, box: Any) -> bytes:
     plaintext = box.decrypt(packet.ciphertext, packet.authenticated, nonce)
     if packet.has_extension:
         (extension_words,) = struct.unpack_from(">H", packet.authenticated, len(packet.authenticated) - 2)
+        if extension_words * 4 > len(plaintext):
+            return None
         plaintext = plaintext[extension_words * 4:]
-    if packet.has_padding and plaintext:
-        plaintext = plaintext[: len(plaintext) - plaintext[-1]]
+    if packet.has_padding:
+        if not plaintext or not 0 < plaintext[-1] <= len(plaintext):
+            return None
+        plaintext = plaintext[:-plaintext[-1]]
     return plaintext
 
 
@@ -132,8 +139,9 @@ def is_newer_sequence(sequence: int, last: int | None) -> bool:
 class _UserDecoder:
     """1人分の Opus デコーダと、16kHz モノラルへの変換の状態。"""
 
-    def __init__(self, decoder: Any) -> None:
+    def __init__(self, decoder: Any, stream: tuple[int, object]) -> None:
         self.decoder = decoder
+        self.stream = stream
         self.downsampler = Downsampler()
         self.last_sequence: int | None = None
 
@@ -146,7 +154,8 @@ class LiveVoiceClient(discord.VoiceClient):
     """
 
     def __init__(self, client: discord.Client, channel: discord.abc.Connectable) -> None:
-        self._ssrc_users: dict[int, int] = {}
+        # 話者と割当世代を1つの不変値として渡す。WS と UDP のスレッド間で混ぜない。
+        self._ssrc_users: dict[int, tuple[int, object]] = {}
         super().__init__(client, channel)
 
     def create_connection_state(self) -> VoiceConnectionState:
@@ -158,16 +167,36 @@ class LiveVoiceClient(discord.VoiceClient):
             op = message.get("op")
             data = message.get("d") or {}
             if op == _OP_SPEAKING and "ssrc" in data and "user_id" in data:
-                self._ssrc_users[int(data["ssrc"])] = int(data["user_id"])
+                ssrc, user_id = int(data["ssrc"]), int(data["user_id"])
+                current = self._ssrc_users.get(ssrc)
+                if current is None or current[0] != user_id:
+                    # 同じ話者の再通知では継続するが、再割当では通番とデコーダを引き継がない。
+                    self._ssrc_users = {
+                        key: value for key, value in self._ssrc_users.items()
+                        if value[0] != user_id and key != ssrc
+                    } | {ssrc: (user_id, object())}
             elif op == _OP_CLIENT_DISCONNECT and "user_id" in data:
                 user_id = int(data["user_id"])
-                for ssrc in [key for key, value in self._ssrc_users.items() if value == user_id]:
-                    self._ssrc_users.pop(ssrc, None)
+                self._ssrc_users = {
+                    key: value for key, value in self._ssrc_users.items() if value[0] != user_id
+                }
+            elif op == _OP_READY:
+                self._ssrc_users = {}
+            elif op in (_OP_SESSION_DESCRIPTION, _OP_RESUMED):
+                # 同じ SSRC・話者でも、再接続前の通番を新しいストリームへ持ち越さない。
+                self._ssrc_users = {
+                    key: (value[0], object()) for key, value in self._ssrc_users.items()
+                }
         except (TypeError, ValueError):
             # 形式の違うメッセージで接続処理を落とさない（話者が分からない音声は捨てるだけ）。
             logger.debug("音声受信: 話者の対応を読めないメッセージを無視しました。", exc_info=True)
 
     def user_id_for_ssrc(self, ssrc: int) -> int | None:
+        stream = self.stream_for_ssrc(ssrc)
+        return stream[0] if stream is not None else None
+
+    def stream_for_ssrc(self, ssrc: int) -> tuple[int, object] | None:
+        """話者と割当世代のスナップショット。切断後の再割当も別の世代になる。"""
         return self._ssrc_users.get(ssrc)
 
 
@@ -253,22 +282,32 @@ class VoiceReceiver:
                 self._warned_mode = True
                 logger.warning("音声受信: 未対応の暗号方式で接続されたため、音声を受信できません。")
             return None
-        user_id = self._voice_client.user_id_for_ssrc(packet.ssrc)
-        if user_id is None:
+        stream = self._voice_client.stream_for_ssrc(packet.ssrc)
+        if stream is None:
             # SPEAKING の通知より先に届いた音声。話者が分からないので捨てる。
+            self._decoders.pop(packet.ssrc, None)
             return None
+        user_id = stream[0]
 
+        # 接続鍵の変更も通番判定より先に検知する。デコーダは UDP のスレッドでだけ入れ替える。
+        box = self._transport_box(connection)
         state = self._decoders.get(packet.ssrc)
+        if state is not None and state.stream != stream:
+            self._decoders.pop(packet.ssrc, None)
+            state = None
         if state is not None and not is_newer_sequence(packet.sequence, state.last_sequence):
             return None
 
-        opus = decrypt_transport(packet, self._transport_box(connection))
+        opus = decrypt_transport(packet, box)
+        if opus is None:
+            self._dropped += 1
+            return None
         opus = self._decrypt_dave(connection, user_id, opus)
         if opus is None:
             self._dropped += 1
             return None
         if state is None:
-            state = self._decoders[packet.ssrc] = _UserDecoder(self._decoder_factory())
+            state = self._decoders[packet.ssrc] = _UserDecoder(self._decoder_factory(), stream)
         state.last_sequence = packet.sequence
         if opus == OPUS_SILENCE_FRAME:
             return None
@@ -282,6 +321,7 @@ class VoiceReceiver:
             # 再接続で鍵が変わったら作り直す。
             self._box = nacl.secret.Aead(key)
             self._box_key = key
+            self._decoders.clear()
         return self._box
 
     @staticmethod

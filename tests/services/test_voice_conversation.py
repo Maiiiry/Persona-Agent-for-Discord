@@ -736,6 +736,169 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(service.get(1))
         self.assertNotIn(1, service._reserved)
 
+    def test_replacement_reservation_keeps_one_slot_and_has_its_own_identity(self):
+        service = self.make_service()
+        service._sessions[1] = Mock()
+        first = service.reserve(1)
+        self.assertIs(service.reserve(1), first)
+        for guild_id in range(2, constants.LIVE_MAX_CONCURRENT_SESSIONS + 1):
+            self.assertTrue(service.reserve(guild_id))
+        service._sessions.pop(1)
+        self.assertFalse(service.reserve(99))
+        service.release_reservation(1)
+        second = service.reserve(1)
+        self.assertIsNot(first, second)
+        service.release_reservation(1, reservation=first)
+        self.assertIs(service.reserve(1), second)
+
+    async def test_stop_during_start_never_registers_or_releases_a_new_reservation(self):
+        """各待機点で停止し、停止後の予約を古い開始処理が消さないことも確かめる。"""
+        for replacing in (False, True):
+            for phase in ("prompt", "live", "panel"):
+                for reserve_again in (False, True):
+                    with self.subTest(replacing=replacing, phase=phase, reserve_again=reserve_again):
+                        service = self.make_service()
+                        if replacing:
+                            service._sessions[1] = SimpleNamespace(stop=AsyncMock())
+                        reservation = service.reserve(1)
+                        guild = SimpleNamespace(id=1, me=None, voice_client=None)
+                        channel = SimpleNamespace(id=CHANNEL_ID)
+                        entered, resume = asyncio.Event(), asyncio.Event()
+
+                        async def wait_at(current):
+                            if phase == current:
+                                entered.set()
+                                await resume.wait()
+
+                        async def load(_path):
+                            await wait_at("prompt")
+                            return "架空のペルソナ"
+
+                        async def start(_conversation):
+                            await wait_at("live")
+
+                        async def panel(_conversation):
+                            await wait_at("panel")
+
+                        with patch.object(voice_conversation, "load_persona_template", load), \
+                                patch.object(VoiceConversation, "start", start), \
+                                patch.object(VoiceConversation, "stop", AsyncMock()) as cleanup, \
+                                patch.object(service, "_post_panel", panel), \
+                                patch.object(voice_conversation, "can_bot_send_messages", return_value=False):
+                            task = asyncio.create_task(service.start(
+                                guild, Mock(), channel, SimpleNamespace(prompt_file="", grounding_enabled=False),
+                                reservation=reservation,
+                            ))
+                            try:
+                                await asyncio.wait_for(entered.wait(), 2)
+                                # 既存会話を外した後にも予約枠が残り、上限を超えない。
+                                self.assertIn(1, service._reserved)
+                                for guild_id in range(2, constants.LIVE_MAX_CONCURRENT_SESSIONS + 1):
+                                    self.assertTrue(service.reserve(guild_id))
+                                self.assertFalse(service.reserve(99))
+                                await service.stop(1, reason="架空の退出")
+                                new_reservation = service.reserve(1) if reserve_again else None
+                                resume.set()
+                                with self.assertRaises(asyncio.CancelledError):
+                                    await asyncio.wait_for(task, 2)
+                                self.assertIsNone(service.get(1))
+                                if reserve_again:
+                                    self.assertIs(service._reserved[1], new_reservation)
+                                else:
+                                    self.assertNotIn(1, service._reserved)
+                                self.assertEqual(cleanup.await_count, 0 if phase == "prompt" else 1)
+                            finally:
+                                resume.set()
+                                if not task.done():
+                                    task.cancel()
+                                await asyncio.gather(task, return_exceptions=True)
+
+    async def test_stop_all_invalidates_starts_before_they_enter_the_service(self):
+        service = self.make_service()
+        reservation = service.reserve(1)
+        await service.stop_all()
+        with patch.object(voice_conversation, "load_persona_template", AsyncMock()) as load:
+            with self.assertRaises(asyncio.CancelledError):
+                await service.start(
+                    SimpleNamespace(id=1), Mock(), Mock(), Mock(), reservation=reservation,
+                )
+        load.assert_not_awaited()
+        self.assertFalse(service._reserved)
+
+    async def test_cancellation_waits_for_replaced_conversation_cleanup(self):
+        service = self.make_service()
+        entered, resume = asyncio.Event(), asyncio.Event()
+
+        async def stop():
+            entered.set()
+            await resume.wait()
+
+        service._sessions[1] = SimpleNamespace(stop=stop)
+        reservation = service.reserve(1)
+        task = asyncio.create_task(service.start(
+            SimpleNamespace(id=1), Mock(), Mock(), Mock(), reservation=reservation,
+        ))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            task.cancel()
+            await asyncio.sleep(0)
+            self.assertIn(1, service._reserved)
+            resume.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+            self.assertIsNone(service.get(1))
+            self.assertNotIn(1, service._reserved)
+        finally:
+            resume.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_old_end_during_replacement_cleanup_preserves_reservation_and_connection(self):
+        service = self.make_service(voice_guard=Mock())
+        entered, resume = asyncio.Event(), asyncio.Event()
+
+        async def stop():
+            # 実際の VoiceConversation.stop() と同じく、二度目の停止は即座に戻る。
+            if entered.is_set():
+                return
+            entered.set()
+            await resume.wait()
+
+        voice_client = SimpleNamespace(disconnect=AsyncMock(), is_connected=lambda: True)
+        guild = SimpleNamespace(id=1, me=None, voice_client=voice_client)
+        old = SimpleNamespace(
+            stop=AsyncMock(side_effect=stop), voice_client=voice_client, guild=guild, _notify=AsyncMock(),
+        )
+        service._sessions[1] = old
+        reservation = service.reserve(1)
+        with patch.object(VoiceConversation, "start", AsyncMock()), \
+                patch.object(service, "_post_panel", AsyncMock()), \
+                patch.object(voice_conversation, "can_bot_send_messages", return_value=False):
+            task = asyncio.create_task(service.start(
+                guild, voice_client, SimpleNamespace(id=CHANNEL_ID),
+                SimpleNamespace(prompt_file="", grounding_enabled=False), reservation=reservation,
+            ))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                await service.end(
+                    1, reason="旧会話の終了", notice="架空の終了案内", disconnect=True, conversation=old,
+                )
+                self.assertIs(service._reserved.get(1), reservation)
+                old.stop.assert_awaited_once()
+                old._notify.assert_not_awaited()
+                service.voice_guard.release.assert_not_called()
+                voice_client.disconnect.assert_not_awaited()
+                resume.set()
+                replacement = await asyncio.wait_for(task, 2)
+                self.assertIs(service.get(1), replacement)
+                self.assertNotIn(1, service._reserved)
+            finally:
+                resume.set()
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
     async def test_start_builds_persona_options_and_posts_the_panel(self):
         service = self.make_service()
         guild = SimpleNamespace(id=1, me=object(), voice_client=None)

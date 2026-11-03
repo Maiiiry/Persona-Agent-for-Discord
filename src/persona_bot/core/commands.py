@@ -297,56 +297,64 @@ def register_commands(
 
         if await skip_superseded_voice_operation(interaction, is_current):
             return
-        if live_voice is not None and guild is not None and not live_voice.reserve(guild.id):
+        reservation = live_voice.reserve(guild.id) if live_voice is not None and guild is not None else None
+        if live_voice is not None and guild is not None and not reservation:
             # 同時に会話できる VC の上限。接続してから断ると無駄に出入りするため、先に確かめる。
             await interaction.followup.send(NOTICE_LIVE_CAPACITY, allowed_mentions=discord.AllowedMentions.none())
             return
         try:
-            await connect_voice(interaction, voice_channel)
+            await connect_voice(interaction, voice_channel, reservation=reservation)
         finally:
             # 開始に進まなかった（接続の失敗・中断）場合も、確保した枠を残さない。
             if live_voice is not None and guild is not None:
-                live_voice.release_reservation(guild.id)
+                live_voice.release_reservation(guild.id, reservation=reservation)
 
     async def start_live_voice(
         interaction: discord.Interaction, voice_client: LiveVoiceClient,
         voice_channel: discord.VoiceChannel | discord.StageChannel,
+        *, reservation: object | None = None,
     ) -> bool:
         """音声会話を始める。始められなければ案内して退出し、False を返す。"""
         guild = interaction.guild
-        if not live_voice.reserve(guild.id):
-            await interaction.followup.send(NOTICE_LIVE_CAPACITY, allowed_mentions=discord.AllowedMentions.none())
-            return False
-        guild_settings = await state.get_guild_async(guild.id)
+        reservation = reservation if reservation is not None else live_voice.reserve(guild.id)
+        started = False
+        notice = NOTICE_LIVE_CAPACITY
         try:
-            await live_voice.start(
-                guild, voice_client, voice_channel, guild_settings.snapshot_response(),
-                fallback_channel=interaction.channel,
-            )
+            if reservation:
+                guild_settings = await state.get_guild_async(guild.id)
+                await live_voice.start(
+                    guild, voice_client, voice_channel, guild_settings.snapshot_response(),
+                    fallback_channel=interaction.channel, reservation=reservation,
+                )
+                started = True
         except Exception as error:
             if not isinstance(error, (LiveUnavailableError, ConsentPanelError)):
                 # ペルソナの読込失敗など。声で会話できない接続をボイスチャンネルに残さない。
                 logger.error("音声会話を始められませんでした。", exc_info=error)
-            if voice_guard is not None:
-                voice_guard.release(guild.id)
-            try:
-                await wait_for_cleanup(voice_client.disconnect(force=True), label="音声会話の開始失敗時の切断")
-            except Exception:
-                logger.warning("音声会話を始められなかった後の切断に失敗しました。", exc_info=True)
             if isinstance(error, ConsentPanelError):
                 notice = NOTICE_CONSENT_PANEL_FAILED
             elif isinstance(error, LiveUnavailableError) and error.quota:
                 notice = NOTICE_LIVE_QUOTA
             else:
                 notice = NOTICE_LIVE_UNAVAILABLE
-            await interaction.followup.send(notice, allowed_mentions=discord.AllowedMentions.none())
-            return False
         finally:
-            live_voice.release_reservation(guild.id)
-        return True
+            if reservation:
+                live_voice.release_reservation(guild.id, reservation=reservation)
+            if not started and guild.voice_client is voice_client:
+                # 設定読込・開始のキャンセルや上限到達でも、会話できない接続を残さない。
+                if voice_guard is not None:
+                    voice_guard.release(guild.id)
+                try:
+                    await wait_for_cleanup(voice_client.disconnect(force=True), label="音声会話の開始失敗時の切断")
+                except Exception:
+                    logger.warning("音声会話を始められなかった後の切断に失敗しました。", exc_info=True)
+        if not started:
+            await interaction.followup.send(notice, allowed_mentions=discord.AllowedMentions.none())
+        return started
 
     async def connect_voice(
         interaction: discord.Interaction, voice_channel: discord.VoiceChannel | discord.StageChannel,
+        *, reservation: object | None = None,
     ) -> None:
         guild = interaction.guild
         # 例外の型ごとに原因を伝える。ここをまとめて握りつぶすと、利用者からは
@@ -404,7 +412,9 @@ def register_commands(
             if voice_guard is not None and guild is not None:
                 voice_guard.adopt(guild.id, voice_channel.id)
             if live_voice is not None and guild is not None:
-                if not await start_live_voice(interaction, attempted_voice_client, voice_channel):
+                if not await start_live_voice(
+                    interaction, attempted_voice_client, voice_channel, reservation=reservation,
+                ):
                     return
             await announce_voice_join(interaction, voice_channel, live=live_voice is not None)
 
