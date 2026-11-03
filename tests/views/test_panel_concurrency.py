@@ -19,8 +19,9 @@ from persona_bot.views.functions_view import FunctionsView, GraphButton, Groundi
 from persona_bot.views.help_view import HelpView
 from persona_bot.views.reminder_view import ReminderView
 from persona_bot.views.stats_privacy_view import StatsPrivacyView, StatsPrivacyConfirmButton, StatsDataDeleteButton, StatsCollectToggleButton
-from persona_bot.views.stats_view import StatsView
-from persona_bot.views.view_parts import BackButton, PanelView, swap_panel
+from persona_bot.views.stats_view import StatsView, RunStatsButton, StatsItemSelect
+from persona_bot.views.summary_view import SummaryView, RunSummaryButton, PrivateToggleButton
+from persona_bot.views.view_parts import BackButton, PanelView, swap_panel, begin_panel_operation, edit_panel_message
 
 
 class PanelConcurrencyTests(unittest.IsolatedAsyncioTestCase):
@@ -127,6 +128,64 @@ class PanelConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         await help_view.on_timeout()
         self.assertEqual(len(self.edits), count)
         self.assertFalse(await self.hub.interaction_check(self.interaction()))
+
+    async def test_stats_start_edit_rejects_late_select_without_losing_result(self):
+        stats = SimpleNamespace(
+            build_dashboard=AsyncMock(return_value=("架空の統計結果", [])),
+            get_user_options=Mock(return_value=[]), display_name=Mock(return_value="架空の本人"),
+        )
+        view = self.track(StatsView(stats, viewer_id="11", is_admin=False))
+        select = next(item for item in view.children if isinstance(item, StatsItemSelect))
+        select._values = ["personality"]
+        entered, release, waiting = self.waiting(None)
+        running = self.start(self.dispatch(view, RunStatsButton, self.interaction(edit=waiting)))
+        await asyncio.wait_for(entered.wait(), 2)
+        self.assertFalse(await view.interaction_check(self.interaction()))
+        # interaction_checkを先に通過済みだったコールバックも世代を進めさせない。
+        late_interaction = self.interaction()
+        late = self.start(select.callback(late_interaction))
+        while not late_interaction.response.defer.await_count:
+            await asyncio.sleep(0)
+        await view.on_timeout()
+        release.set()
+        await asyncio.wait_for(asyncio.gather(running, late), 2)
+        stats.build_dashboard.assert_awaited_once_with("11", "all", viewer_id="11")
+        self.assertEqual(self.edits[-1]["content"], "架空の統計結果")
+        self.assertEqual(len(self.edits), 2)
+
+    async def test_summary_start_edit_keeps_private_choice_and_completes_after_late_toggle(self):
+        view = self.track(SummaryView(self.settings, Mock(), Mock(), Mock(), Mock()))
+        view.temp_private = True
+        toggle = next(item for item in view.children if isinstance(item, PrivateToggleButton))
+        entered, release, waiting = self.waiting(None)
+        interaction = self.interaction(edit=waiting)
+        interaction.channel = Mock()
+        with patch("persona_bot.views.summary_view.is_supported_message_channel", return_value=True), \
+             patch("persona_bot.views.summary_view.generate_channel_summary", new=AsyncMock(return_value=(True, "架空の要約結果"))), \
+             patch("persona_bot.views.summary_view.send_long_message", new=AsyncMock()) as public:
+            running = self.start(self.dispatch(view, RunSummaryButton, interaction))
+            await asyncio.wait_for(entered.wait(), 2)
+            self.assertFalse(await view.interaction_check(self.interaction()))
+            late_interaction = self.interaction()
+            late = self.start(toggle.callback(late_interaction))
+            while not late_interaction.response.defer.await_count:
+                await asyncio.sleep(0)
+            release.set()
+            await asyncio.wait_for(asyncio.gather(running, late), 2)
+        public.assert_not_awaited()
+        self.assertEqual(self.edits[-1]["content"], "架空の要約結果")
+        self.assertEqual(len(self.edits), 2)
+
+    async def test_failed_close_edit_restores_live_view(self):
+        for error in (RuntimeError("架空の編集失敗"), asyncio.CancelledError()):
+            with self.subTest(error=type(error).__name__):
+                interaction = self.interaction()
+                interaction.response.edit_message.side_effect = error
+                begin_panel_operation(self.hub, interaction)
+                with self.assertRaises(type(error)):
+                    await edit_panel_message(interaction, content="実行中", view=None)
+                self.assertTrue(await self.hub.interaction_check(self.interaction()))
+                self.assertFalse(self.hub.is_finished())
 
     async def test_old_reminder_query_discards_and_stops_its_unused_panel(self):
         entered, release, self.reminders.list_pending = self.waiting([])

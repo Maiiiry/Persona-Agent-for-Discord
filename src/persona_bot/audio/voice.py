@@ -278,7 +278,7 @@ async def _play_pcm_locked(voice_client: discord.VoiceClient, pcm: bytes) -> Non
             logger.error(f'TTS: キャンセル時の再生停止に失敗しました: {type(error).__name__}', exc_info=error)
         raise
     except asyncio.TimeoutError:
-        logger.warning(f'TTS: 再生の完了通知が {timeout_seconds:.1f} 秒以内に届かなかったため、この読み上げを打ち切って次へ進みます（guild_id=<ID>）。ボイス接続が正常な切断を経ずに切れた可能性があります。', exc_info=True)
+        logger.warning(f'TTS: 再生の完了通知が {timeout_seconds:.1f} 秒以内に届かなかったため、この読み上げを打ち切って次へ進みます。ボイス接続が正常な切断を経ずに切れた可能性があります。', exc_info=True)
         try:
             # まだ鳴っている場合に次の読み上げと音が重ならないよう止めておく。
             # 既に切断されていると例外になりうるが、打ち切り自体は続行する。

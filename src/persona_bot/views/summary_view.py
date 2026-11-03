@@ -215,6 +215,7 @@ class RunSummaryButton(ui.Button):
             return
 
         # パネル（エフェメラル）を「要約中」に更新してコンポーネント応答を返す。
+        period, private = view.temp_period, view.temp_private
         if not await edit_panel_message(interaction, content="🔄 要約中...", view=None):
             return
 
@@ -230,7 +231,7 @@ class RunSummaryButton(ui.Button):
             is_summary, text = await generate_channel_summary(
                 channel,
                 bot_user,
-                view.temp_period,
+                period,
                 guild_settings=view.guild_settings,
                 gemini=view.gemini,
                 moderator=view.moderator,
@@ -251,7 +252,7 @@ class RunSummaryButton(ui.Button):
                 await _report_failure(interaction, _FAILURE_NOTICE, keep_result=False)
                 return
 
-            if view.temp_private:
+            if private:
                 # 結果を自分だけに: パネルを結果で上書きし、続きも本人だけの followup で送る。
                 chunks = split_message(text)
                 if not await edit_panel_message(interaction, deferred=True, content=chunks[0]):

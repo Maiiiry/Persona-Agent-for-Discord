@@ -1,3 +1,5 @@
+from typing import Callable
+
 import discord
 from discord import ui
 
@@ -16,6 +18,7 @@ from persona_bot.config.constants import (
 )
 from persona_bot.config.personas import (
     FOLLOW_DEFAULT_PERSONA, PersonaCatalog, current_persona_catalog, is_selectable_persona,
+    refresh_persona_catalog,
 )
 from persona_bot.utils.discord_helpers import (
     is_administrator, is_bot_owner, is_current_administrator, is_current_bot_owner,
@@ -276,14 +279,23 @@ class OpenAutonomousChannelButton(ui.Button):
             return
         async def make_settings(back_interaction: discord.Interaction) -> SettingsView:
             await back_interaction.response.defer(ephemeral=True)
+            await refresh_persona_catalog()
             # 開き直すときも、全体の違反件数は最新の所有者だけに表示する。
             blacklist_status = "非公開（ボット所有者のみ）"
             if is_bot_owner(back_interaction) and await is_current_bot_owner(back_interaction):
                 blacklist_status = view.blacklist_status
-            return SettingsView(
-                view.guild_settings, view.ng_count, blacklist_status,
+            settings = SettingsView(
+                view.guild_settings,
+                view.ng_count_provider() if view.ng_count_provider is not None else view.ng_count,
+                blacklist_status,
                 make_hub=view.make_hub, is_admin=is_administrator(back_interaction.user),
+                ng_count_provider=view.ng_count_provider,
             )
+            settings.temp_persona = view.temp_persona
+            settings.temp_model = view.temp_model
+            settings.temp_respond_mode = view.temp_respond_mode
+            settings.refresh_items()
+            return settings
 
         channel_view = AutonomousChannelView(
             view.guild_settings, guild, make_hub=view.make_hub, make_settings=make_settings,
@@ -308,6 +320,7 @@ class SettingsView(PanelView):
         *,
         make_hub: HubFactory | None = None,
         is_admin: bool = False,
+        ng_count_provider: Callable[[], int] | None = None,
     ) -> None:
         super().__init__(
             timeout_notice=(
@@ -317,6 +330,7 @@ class SettingsView(PanelView):
         )
         self.guild_settings = guild_settings
         self.ng_count = ng_count
+        self.ng_count_provider = ng_count_provider
         self.blacklist_status = blacklist_status
         # 「戻る」ボタンが機能パネルを再生成するための生成関数
         self.make_hub = make_hub

@@ -526,6 +526,60 @@ class AnniversaryChannelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(self.settings.auto_topic_channels), {10, 20, 30})
         self.assert_recorded(False)
 
+    async def test_active_session_defers_anniversary_until_next_check_after_stop(self):
+        self.settings.autonomous_session = object()
+        await self.celebrate()
+        self.client.get_guild.assert_not_called()
+        self.gemini.generate.assert_not_awaited()
+        self.assert_recorded(False)
+        self.settings.autonomous_session = None
+        await self.celebrate()
+        await self.celebrate()
+        self.channels[10].send.assert_awaited_once()
+        self.assert_recorded(True)
+
+    async def test_session_started_during_anniversary_wait_defers_without_recording(self):
+        for stage in ("member", "prompt", "history", "generation", "moderation"):
+            with self.subTest(stage=stage):
+                self.reset_bot_permissions()
+                self.settings.autonomous_session = None
+                entered, release = asyncio.Event(), asyncio.Event()
+                result = {
+                    "member": self.member, "prompt": "架空のペルソナ", "history": "架空の履歴",
+                    "generation": ("架空のお祝い", None, []), "moderation": (False, "架空の判定"),
+                }[stage]
+
+                async def pause(*args, **kwargs):
+                    entered.set()
+                    await release.wait()
+                    return result
+
+                target, name = {
+                    "member": (self.service, "_resolve_member"),
+                    "prompt": (auto_topic_service, "load_persona_template"),
+                    "history": (auto_topic_service, "fetch_channel_history_text"),
+                    "generation": (self.gemini, "generate"),
+                    "moderation": (self.service._moderator, "check"),
+                }[stage]
+                with patch.object(target, name, new=AsyncMock(side_effect=pause)):
+                    task = asyncio.create_task(self.celebrate())
+                    try:
+                        await asyncio.wait_for(entered.wait(), 3)
+                        self.settings.autonomous_session = object()
+                        release.set()
+                        await task
+                    finally:
+                        release.set()
+                        await task
+                self.channels[10].send.assert_not_awaited()
+                self.assert_recorded(False)
+                if stage in ("member", "prompt", "history"):
+                    self.gemini.generate.assert_not_awaited()
+                self.settings.autonomous_session = None
+                await self.celebrate()
+                self.channels[10].send.assert_awaited_once()
+                self.assert_recorded(True)
+
     async def test_disabling_anniversary_during_wait_does_not_record_or_generate_later_users(self):
         for stage in ("member", "history", "generation", "moderation"):
             with self.subTest(stage=stage):

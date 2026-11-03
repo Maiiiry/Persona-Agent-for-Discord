@@ -109,8 +109,17 @@ async def edit_panel_message(
                 if not getattr(interaction.response, "is_done", lambda: False)():
                     await interaction.response.defer(ephemeral=True)
                 return False
-            await _edit_panel_message(interaction, content=content, view=view, deferred=deferred)
             previous = state.current
+            # 閉じる編集の通信中は新しい操作を受け付けない。後発のセレクトが
+            # 実行中の世代を無効にし、両方の結果が破棄されることを防ぐ。
+            if view is None:
+                state.current = None
+            try:
+                await _edit_panel_message(interaction, content=content, view=view, deferred=deferred)
+            except BaseException:
+                if view is None and operation.is_current() and previous is not None and not previous.is_finished():
+                    state.current = previous
+                raise
             if previous is not view:
                 state.current = view
                 if isinstance(view, PanelView):

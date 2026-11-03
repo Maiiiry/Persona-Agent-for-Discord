@@ -23,7 +23,7 @@ from persona_bot.views.autonomous_channel_view import (
 from persona_bot.views.settings_view import OpenAutonomousChannelButton, SettingsView
 from persona_bot.views.view_parts import BackButton
 from tests.helpers.member_helpers import make_member, make_owner_client
-from tests.helpers.persona_helpers import install_empty_persona_catalog
+from tests.helpers.persona_helpers import install_empty_persona_catalog, install_persona_catalog
 
 
 def make_channel(channel_id: int, name: str, **denied: bool):
@@ -68,6 +68,9 @@ def child(view, item_type):
 class SettingsEntryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         install_empty_persona_catalog(self)
+        refresh = patch("persona_bot.views.settings_view.refresh_persona_catalog", new=AsyncMock())
+        self.refresh_catalog = refresh.start()
+        self.addCleanup(refresh.stop)
         self.settings = BotState().get_guild(1)
         self.guild = make_guild()
 
@@ -230,6 +233,39 @@ class SettingsEntryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(
                     any(isinstance(item, OpenAutonomousChannelButton) for item in parent.children), admin,
                 )
+
+    async def test_return_refreshes_catalog_and_counts_without_losing_unsaved_choices(self) -> None:
+        from persona_bot.config.choices import MODEL_CHOICES
+        original = install_persona_catalog(self)
+        view = self.settings_view(is_admin=True)
+        view.temp_persona = original.personas[-1].value
+        view.temp_model = MODEL_CHOICES[-1].value
+        view.temp_respond_mode = "all"
+        ng = SimpleNamespace(count=3)
+        view.ng_count_provider = lambda: ng.count
+        opening = make_interaction(guild=self.guild)
+        await child(view, OpenAutonomousChannelButton).callback(opening)
+        panel = opening.edit_original_response.await_args.kwargs["view"]
+        self.addCleanup(panel.stop)
+        updated = []
+
+        async def refresh():
+            updated.append(install_persona_catalog(self, "../prompts/new_fictional.txt"))
+
+        self.refresh_catalog.side_effect = refresh
+        ng.count = 7
+        returning = make_interaction(guild=self.guild)
+        await child(panel, BackButton).callback(returning)
+        parent = returning.edit_original_response.await_args.kwargs["view"]
+        self.addCleanup(parent.stop)
+        self.refresh_catalog.assert_awaited_once()
+        self.assertIs(parent.catalog, updated[0])
+        self.assertEqual(parent.ng_count, 7)
+        self.assertEqual(parent.temp_persona, view.temp_persona)
+        self.assertEqual(parent.temp_model, view.temp_model)
+        self.assertEqual(parent.temp_respond_mode, view.temp_respond_mode)
+        self.assertIn("ファイルが見つからない", parent.build_preview())
+        self.assertNotEqual(self.settings.current_prompt_file, view.temp_persona)
 
     async def test_return_does_not_redisplay_blacklist_count_after_owner_change(self) -> None:
         view = self.settings_view(is_admin=True)

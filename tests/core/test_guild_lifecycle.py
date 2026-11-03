@@ -10,10 +10,93 @@ from unittest.mock import AsyncMock, Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from persona_bot.core.app_state import BotState
-from persona_bot.core.guild_lifecycle import remove_guild_state
+from persona_bot.core.guild_lifecycle import prepare_guild_join, remove_guild_state
 
 
 class GuildRemoveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rejoin_during_each_stop_preserves_new_state_even_on_cancellation(self):
+        for stage in ("autonomous", "voice"):
+            for canceled in (False, True):
+                with self.subTest(stage=stage, canceled=canceled):
+                    state = BotState()
+                    old = state.get_guild(1)
+                    state.welcomed_guild_ids.add(1)
+                    guard = SimpleNamespace(release=Mock())
+                    entered, release = asyncio.Event(), asyncio.Event()
+
+                    async def stop(*args, **kwargs):
+                        entered.set()
+                        await release.wait()
+
+                    autonomous = SimpleNamespace(stop_session=AsyncMock(
+                        side_effect=stop if stage == "autonomous" else None,
+                    ))
+                    conversation = SimpleNamespace(stop=AsyncMock(
+                        side_effect=stop if stage == "voice" else None,
+                    ))
+                    task = asyncio.create_task(remove_guild_state(1, state, autonomous, guard, conversation))
+                    try:
+                        await asyncio.wait_for(entered.wait(), 2)
+                        prepare_guild_join(1, state, guard)
+                        self.assertFalse(old.is_active)
+                        restored = await state.get_guild_async(1)
+                        self.assertIsNot(restored, old)
+                        state.welcomed_guild_ids.add(1)
+                        # 再参加時に旧保護を解除した後の、新しい接続保護を模擬する。
+                        guard.release.reset_mock()
+                        if canceled:
+                            task.cancel()
+                        release.set()
+                        if canceled:
+                            with self.assertRaises(asyncio.CancelledError):
+                                await task
+                        else:
+                            await asyncio.wait_for(task, 2)
+                    finally:
+                        release.set()
+                        await asyncio.gather(task, return_exceptions=True)
+                    self.assertIs(state.guild_settings[1], restored)
+                    self.assertTrue(restored.is_active)
+                    self.assertIn(1, state.welcomed_guild_ids)
+                    guard.release.assert_not_called()
+                    if stage == "autonomous":
+                        conversation.stop.assert_not_awaited()
+                    self.assertEqual(state.guild_removals, {})
+
+    async def test_rejoin_without_settings_restoration_keeps_welcome_and_voice_guard(self):
+        state = BotState()
+        state.get_guild(1)
+        guard = SimpleNamespace(release=Mock())
+
+        async def rejoin(*args, **kwargs):
+            prepare_guild_join(1, state, guard)
+            state.welcomed_guild_ids.add(1)
+            guard.release.reset_mock()
+
+        await remove_guild_state(1, state, SimpleNamespace(stop_session=AsyncMock(side_effect=rejoin)), guard)
+        self.assertEqual(state.guild_settings, {})
+        self.assertIn(1, state.welcomed_guild_ids)
+        guard.release.assert_not_called()
+        self.assertEqual(state.guild_removals, {})
+
+    async def test_new_settings_without_join_callback_are_not_removed(self):
+        state = BotState()
+        old = state.get_guild(1)
+        guard = SimpleNamespace(release=Mock())
+
+        async def replace(*args, **kwargs):
+            state.forget_guild(1)
+            state.get_guild(1)
+            state.welcomed_guild_ids.add(1)
+
+        conversation = SimpleNamespace(stop=AsyncMock())
+        await remove_guild_state(1, state, SimpleNamespace(stop_session=AsyncMock(side_effect=replace)), guard, conversation)
+        self.assertIsNot(state.get_guild(1), old)
+        self.assertIn(1, state.welcomed_guild_ids)
+        guard.release.assert_not_called()
+        conversation.stop.assert_not_awaited()
+        self.assertEqual(state.guild_removals, {})
+
     async def test_only_removed_guild_is_released_after_stop_even_on_failure(self):
         for error in (None, OSError("架空の障害"), asyncio.CancelledError()):
             with self.subTest(error=type(error).__name__):

@@ -280,26 +280,33 @@ class AgentThreadProgress(AgentProgressBase):
 
     async def _child_send(self, content: str, *, suppress_embeds: bool = False) -> None:
         """子の名前とアイコンで投稿する。長い報告は分割する。失敗しても作業は止めない。"""
+        retried = False
         for chunk in split_message(content):
-            if self._webhook is None:
-                return
-            try:
-                await self._webhook.send(
-                    chunk,
-                    username=self._child_name,
-                    avatar_url=self._avatar_url,
-                    thread=self._thread,
-                    allowed_mentions=_NO_MENTIONS,
-                    suppress_embeds=suppress_embeds,
-                    wait=True,
-                )
-            except discord.NotFound as error:
-                # 依頼の途中で Webhook が消された。次の依頼では作り直す。
-                logger.warning("サブエージェント: Webhook が見つからないため、この依頼では子の投稿をやめます。", exc_info=error)
-                self._webhooks.forget(self._source.channel.id, self._webhook)
-                self._webhook = None
-            except discord.DiscordException as error:
-                logger.warning("サブエージェント: 子の投稿を送れませんでした。", exc_info=error)
+            while self._webhook is not None:
+                try:
+                    await self._webhook.send(
+                        chunk,
+                        username=self._child_name,
+                        avatar_url=self._avatar_url,
+                        thread=self._thread,
+                        allowed_mentions=_NO_MENTIONS,
+                        suppress_embeds=suppress_embeds,
+                        wait=True,
+                    )
+                    break
+                except discord.NotFound as error:
+                    self._webhooks.forget(self._source.channel.id, self._webhook)
+                    self._webhook = None
+                    if retried:
+                        logger.warning("サブエージェント: 再取得した Webhook でも投稿できませんでした。", exc_info=error)
+                        return
+                    logger.warning("サブエージェント: Webhook が見つからないため、再取得して投稿をやり直します。", exc_info=error)
+                    retried = True
+                    self._webhook = await self._webhooks.get(self._source.channel, self._source.guild.me.id)
+                except discord.DiscordException as error:
+                    logger.warning("サブエージェント: 子の投稿を送れませんでした。", exc_info=error)
+                    return
+            else:
                 return
 
 

@@ -18,7 +18,7 @@ from persona_bot.core.background import make_guarded_loop, run_in_thread, spawn
 from persona_bot.services.blacklist_service import BlacklistService
 from persona_bot.core.bot_client import PersonaClient
 from persona_bot.core.commands import register_commands
-from persona_bot.core.guild_lifecycle import remove_guild_state
+from persona_bot.core.guild_lifecycle import prepare_guild_join, remove_guild_state
 from persona_bot.config.constants import (
     ANNIVERSARY_CHECK_MINUTES,
     AUTO_TOPIC_CHECK_MINUTES,
@@ -251,6 +251,7 @@ async def on_guild_join(guild: discord.Guild) -> None:
     （案内が出せなくてもボット自体は普通に使えるのでフェイルオープンにする）。
     必要な guilds インテントは Intents.default() に含まれるため設定変更は不要。
     """
+    prepare_guild_join(guild.id, state, voice_guard)
     try:
         welcome_text = build_welcome_text(resolve_bot_name(client.user))
         await post_welcome_message(guild, welcome_text, state.welcomed_guild_ids)

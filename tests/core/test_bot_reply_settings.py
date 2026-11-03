@@ -436,6 +436,22 @@ class ReplySettingsTests(unittest.IsolatedAsyncioTestCase):
         self.namespace["memory"].append_pending_log.assert_not_awaited()
         self.feedback.track_reply.assert_not_called()
 
+    async def test_grounding_previews_are_suppressed_only_for_accepted_reply(self) -> None:
+        sources = [{"title": "架空の参考資料", "uri": "https://example.com/reference"}]
+        generator = self.namespace["gemini"].generate_with_metadata
+        generator.side_effect = None
+        generator.return_value = (self.response, None, sources, "selected-model")
+        for accepted in (True, False):
+            with self.subTest(accepted=accepted):
+                moderator = self.namespace["moderator"].check
+                moderator.side_effect = None
+                moderator.return_value = (accepted, "")
+                sent = self.namespace["send_long_reply"]
+                sent.reset_mock()
+                await self.handler.handle_chat_message(self.message, "架空の質問")
+                self.assertEqual(sent.await_args.kwargs["suppress_embeds"], accepted)
+                self.assertEqual("https://example.com/reference" in sent.await_args.args[1], accepted)
+
     async def test_actual_generator_model_and_captured_persona_reach_feedback_database(self) -> None:
         from persona_bot.core import message_handler
 

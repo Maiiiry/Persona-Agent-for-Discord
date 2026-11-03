@@ -294,13 +294,71 @@ class ThreadProgressTests(unittest.IsolatedAsyncioTestCase):
     async def test_deleted_webhook_is_forgotten_and_does_not_stop_work(self) -> None:
         progress = await self.open()
         self.webhook.send.side_effect = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "架空")
+        replacement = own_webhook()
+        self.channel.webhooks.return_value = [replacement]
         with patch("persona_bot.views.agent_thread.logger"):
             await progress.update(0, "候補の検索")
             await progress.update(1, "特徴の比較")
             await progress.finish("done", AgentReport("架空の報告の本文", []))
-        # 消えた Webhook は以降この依頼で使わず、次の依頼のためにキャッシュからも外す
+        # 同じ依頼の失敗した投稿から再送し、進捗と最終報告も新しいWebhookへ続ける。
         self.assertEqual(self.webhook.send.await_count, 2)
+        self.assertIs(self.webhooks._cache[self.channel.id], replacement)
+        self.assertEqual(replacement.send.await_count, 3)
+        self.assertEqual(replacement.send.await_args_list[0].args[0], "候補の検索中（1/2）")
+        self.assertIn("架空の報告の本文", replacement.send.await_args.args[0])
+        self.assertEqual(self.thread.send.await_args.args[0], "架空の完了")
+
+    async def test_cached_webhook_deleted_before_start_is_recreated(self) -> None:
+        self.webhooks._cache[self.channel.id] = self.webhook
+        self.webhook.send.side_effect = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "架空")
+        replacement = own_webhook()
+        self.channel.webhooks.return_value = []
+        self.channel.create_webhook.return_value = replacement
+        await self.open()
+        self.channel.create_webhook.assert_awaited_once()
+        self.assertEqual(replacement.send.await_args.args[0], "引き受けました（2手順）")
+
+    async def test_deleted_webhook_retries_only_failed_chunk_and_preserves_send_options(self) -> None:
+        progress = await self.open()
+        missing = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "架空")
+        self.webhook.send.reset_mock()
+        self.webhook.send.side_effect = [None, missing]
+        replacement = own_webhook()
+        self.channel.webhooks.return_value = [replacement]
+        content = "あ" * 2100
+        with patch("persona_bot.views.agent_thread.logger"):
+            await progress._child_send(content, suppress_embeds=True)
+        replacement.send.assert_awaited_once()
+        sent = replacement.send.await_args
+        self.assertEqual(sent.args[0], "あ" * 100)
+        self.assertIs(sent.kwargs["thread"], self.thread)
+        self.assertTrue(sent.kwargs["suppress_embeds"])
+        self.assertTrue(sent.kwargs["wait"])
+        self.assertTrue(no_mentions(sent))
+        self.assertEqual(sent.kwargs["username"], "見習い架空の調査担当")
+
+    async def test_second_not_found_stops_retrying_and_forgets_replacement(self) -> None:
+        progress = await self.open()
+        missing = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "架空")
+        self.webhook.send.side_effect = missing
+        replacement = own_webhook(send=AsyncMock(side_effect=missing))
+        self.channel.webhooks.reset_mock()
+        self.channel.webhooks.return_value = [replacement]
+        with patch("persona_bot.views.agent_thread.logger"):
+            await progress.update(0, "候補の検索")
+            await progress.update(1, "特徴の比較")
+        self.channel.webhooks.assert_awaited_once()
+        replacement.send.assert_awaited_once()
         self.assertNotIn(self.channel.id, self.webhooks._cache)
+
+    async def test_webhook_recovery_failure_does_not_stop_work(self) -> None:
+        progress = await self.open()
+        self.webhook.send.side_effect = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "架空")
+        self.channel.webhooks.side_effect = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "架空")
+        with patch("persona_bot.views.agent_thread.logger"):
+            await progress.update(0, "候補の検索")
+            await progress.finish("done", AgentReport("架空の報告の本文", []))
+        self.assertIsNone(progress._webhook)
         self.assertEqual(self.thread.send.await_args.args[0], "架空の完了")
 
     async def test_child_post_failure_is_logged_and_work_continues(self) -> None:

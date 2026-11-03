@@ -51,6 +51,7 @@ class OpenSettingsButton(ui.Button):
         settings_view = SettingsView(
             hub.guild_settings,
             ng_count=hub.ng_filter.word_count,
+            ng_count_provider=lambda: hub.ng_filter.word_count,
             blacklist_status=blacklist_status,
             make_hub=hub.clone,
             # 押した時点の権限で、管理者専用の 🎙️ 配信先 を出すかを決める

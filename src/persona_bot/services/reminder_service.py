@@ -478,6 +478,12 @@ class ReminderService:
                 return
 
         if isinstance(channel, discord.Thread) and channel.archived:
+            # 取消済みの系列は、通知だけでなくスレッドの再開も行わない。
+            # 再開の通信中は従来どおり取消を受け付け、送信直前にも再確認する。
+            if record.get("next_remind_at"):
+                async with self._delivery_lock(int(record["reminder_id"])):
+                    if not await run_in_thread(self._db.reminder_is_pending, int(record["reminder_id"])):
+                        return
             # 宛先を親へ変えると、非公開スレッドの内容を別の参加者へ漏らしうる。
             # 元のスレッドだけを再開し、ロック解除や代替配送は行わない。
             if channel.locked and not channel.permissions_for(guild.me).manage_threads:

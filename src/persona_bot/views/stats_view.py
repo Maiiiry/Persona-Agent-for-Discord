@@ -91,6 +91,7 @@ class RunStatsButton(ui.Button):
 
         begin_panel_operation(view, interaction)
         # パネル（エフェメラル）を「集計中」に更新してから長時間処理に入る。
+        item = view.temp_item
         if not await edit_panel_message(interaction, content="🔄 集計中...", view=None):
             return
 
@@ -101,9 +102,10 @@ class RunStatsButton(ui.Button):
         # 「選んだ後に相手が停止した」場合はパネルが開いたままなので到達しうる。
         images = []
         files = []
+        result_shown = False
         try:
             caption, images = await view.stats.build_dashboard(
-                target_id, view.temp_item, viewer_id=view.viewer_id
+                target_id, item, viewer_id=view.viewer_id
             )
             # 描画・解析の待機中にも権限は変わりうる。interaction.user は押した時点の写しなので、
             # 送信直前に最新の Member で他人のデータを守る（本人の統計は管理者でなくてよい）。
@@ -121,6 +123,7 @@ class RunStatsButton(ui.Button):
             chunks = split_message(caption) or ["表示できる統計の本文がありません。"]
             if not await edit_panel_message(interaction, deferred=True, content=chunks[0]):
                 return
+            result_shown = True
             for chunk in chunks[1:]:
                 await interaction.followup.send(chunk, ephemeral=True)
             if files:
@@ -129,10 +132,18 @@ class RunStatsButton(ui.Button):
         except Exception as error:
             logger.error("会話統計の生成・送信中にエラーが発生しました。", exc_info=error)
             notice = "エラー: 統計の表示に失敗しました。"
+            if not panel_operation_is_current(view, interaction):
+                return
+            if not result_shown:
+                try:
+                    await edit_panel_message(interaction, deferred=True, content=notice, view=None)
+                    return
+                except Exception as notice_error:
+                    logger.warning("会話統計: 失敗の案内をパネルに表示できませんでした。", exc_info=notice_error)
             try:
-                await edit_panel_message(interaction, deferred=True, content=notice, view=None)
-            except Exception:
                 await interaction.followup.send(notice, ephemeral=True)
+            except Exception as notice_error:
+                logger.error("会話統計: 失敗の案内を送れませんでした。", exc_info=notice_error)
         finally:
             # discord.Fileが差し替えたcloseを戻してから、元のバッファを閉じる。
             for file in files:
