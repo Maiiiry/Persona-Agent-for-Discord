@@ -179,6 +179,8 @@ python bot.py     # 成功時に "ログイン成功: <bot>" と表示される
 
 ## 開発者用ダッシュボード (`tools/console/`)
 
+データ画面の開いているテーブルと閉じるアニメーション中のテーブルは、選択時の`connectionKey`と組で保持する。現在の接続と一致する選択だけを描画し、接続変更時のeffectだけに解除を任せない（子の取得effectが先に動くため）。新しい接続では明示的な選択までテーブル内容を取得しない（#344）。
+
 サーバー設定インサイトはスキーマ15の`autonomous_stage_channel_id` / `autonomous_voice_channel_id`も取得する。正の整数のIDは精度を保つ文字列、指定なしは`null`、列が無い旧版は項目なしとして区別する。サーバー一覧とDM設定の専用欄は描画時に`mask`し、`collectSecrets`にも登録する。設定名を取得するためのDiscord API呼出しは増やさない（#292）。
 
 インサイトのモデル・応答モード・自発会話間隔は、保存値を各選択肢と照合し、ボット本体の`GuildSettings.apply_persisted`と同じ既定値へ解決する（間隔は整数のみで`bool`を除外）。`journal()`は成功時に一覧（0件を含む）、失敗時に`None`を返す。初回のログ取得失敗時は古い会話の検索を重ねず、`note()`は同じエラー文を初出順に1件だけ記録する（#259）。
@@ -443,6 +445,8 @@ gTTSへの退避では、各HTTP要求へ `TTS_GTTS_CONNECT_TIMEOUT_SECONDS`・`
 - **確認範囲**: 受信・変換・接続・会話の制御・同意パネル・`/join` 連携は回帰テスト（`tests/audio/test_live_audio.py`・`test_voice_receive.py`・`tests/services/test_live_session.py`・`test_voice_conversation.py`・`test_voice_moderation.py`・`tests/views/test_voice_consent_view.py`・`tests/core/test_join_live_voice.py`）のモックで再現している。実際の Discord（DAVE の受信）と Gemini Live での会話・遅延・利用量は検証用サーバーで確かめること。
 
 ### ボイス接続先の保護 (`voice_guard.py`)
+
+音声会話の`VoiceConversationService.end()`は、会話停止の待機後に加え、終了案内の送信後にも新しい会話と開始枠の予約を確認する。保護解除・切断の直前まで確認し、案内待ち中に同じ接続で再開した会話を旧処理から切断しない（#345）。
 
 外部移動後の接続確立が時間切れになった場合も、同じVoiceClientと保護情報を照合し、自律配信の `handle_external_move` を切断前に通す。締め・所有ステージ枠・セッションを回収し、配信側が引き受けなかった同じ接続だけを既存の退出処理で片付ける（#289）。
 

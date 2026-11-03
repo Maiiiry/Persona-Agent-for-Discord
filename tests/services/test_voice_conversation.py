@@ -814,6 +814,69 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
                 old._notify.assert_not_awaited()
                 service.voice_guard.release.assert_not_called()
 
+    async def test_end_preserves_takeover_while_sending_notice(self):
+        """終了案内の送信待ちに再開・予約された接続は、旧会話の後片付けで切らない。"""
+        for takeover in ("session", "reservation", "none"):
+            with self.subTest(takeover=takeover):
+                service = self.make_service(voice_guard=Mock())
+                voice_client = Mock()
+                voice_client.is_connected.return_value = True
+                voice_client.disconnect = AsyncMock()
+                guild = SimpleNamespace(id=1, me=object(), voice_client=voice_client)
+                channel = SimpleNamespace(id=CHANNEL_ID, members=[], send=AsyncMock())
+                entered = asyncio.Event()
+                resume = asyncio.Event()
+
+                async def notify(_notice):
+                    entered.set()
+                    await resume.wait()
+
+                old = SimpleNamespace(
+                    voice_client=voice_client, guild=guild, stop=AsyncMock(),
+                    _notify=AsyncMock(side_effect=notify),
+                )
+                service._sessions[1] = old
+                ending = asyncio.create_task(service.end(
+                    1, reason="架空", notice="架空の案内", disconnect=True, conversation=old,
+                ))
+                new = None
+                try:
+                    await asyncio.wait_for(entered.wait(), timeout=2)
+                    old.stop.assert_awaited_once()
+                    self.assertIsNone(service.get(1))
+                    if takeover != "none":
+                        self.assertTrue(service.reserve(1))
+                    if takeover == "session":
+                        # 登録処理は実物を使い、外部接続とペルソナ読込だけを差し替える。
+                        with patch.object(VoiceConversation, "start", AsyncMock()), \
+                                patch.object(voice_conversation, "load_persona_template", AsyncMock(return_value="架空")), \
+                                patch.object(voice_conversation, "current_persona_catalog") as catalog, \
+                                patch.object(voice_conversation, "can_bot_send_messages", return_value=True):
+                            catalog.return_value.voice_profile.return_value = {}
+                            new = await service.start(guild, voice_client, channel, SimpleNamespace(
+                                prompt_file="", grounding_enabled=False,
+                            ))
+                        self.assertIs(service.get(1), new)
+                        self.assertNotIn(1, service._reserved)
+                    resume.set()
+                    await asyncio.wait_for(ending, timeout=2)
+                    old._notify.assert_awaited_once_with("架空の案内")
+                    if takeover == "none":
+                        service.voice_guard.release.assert_called_once_with(1)
+                        voice_client.disconnect.assert_awaited_once_with(force=True)
+                    else:
+                        service.voice_guard.release.assert_not_called()
+                        voice_client.disconnect.assert_not_awaited()
+                        if takeover == "session":
+                            self.assertIs(service.get(1), new)
+                        else:
+                            self.assertIn(1, service._reserved)
+                finally:
+                    resume.set()
+                    await asyncio.wait_for(ending, timeout=2)
+                    if new is not None and new.panel_view is not None:
+                        new.panel_view.stop()
+
     async def test_live_ending_while_the_panel_is_posted_fails_the_start(self):
         """開始の途中（パネルの投稿を待つ間）に Live が終わったら、声に応答しない会話を登録しない。"""
         for reason, quota in (("quota", True), ("failed", False)):

@@ -1142,6 +1142,9 @@ class VoiceConversationService:
             return
         if notice:
             await current._notify(notice)
+        if guild_id in self._sessions or guild_id in self._reserved:
+            # 案内の送信中にも /join は始まる。保護解除・切断の直前に所有権を再確認する。
+            return
         guild = current.guild
         if disconnect and guild.voice_client is voice_client and voice_client.is_connected():
             if self.voice_guard is not None:

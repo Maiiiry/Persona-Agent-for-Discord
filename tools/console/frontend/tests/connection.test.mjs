@@ -261,6 +261,129 @@ test("データ画面は接続先が変わったら、開いていたテーブ�
   }
 });
 
+test("接続切替の最初の描画から、子のテーブル取得を明示的な選択まで止める", async () => {
+  const parent = renderer();
+  const requests = [];
+  let connectionKey = "A";
+  const api = {
+    db: async () => ({ exists: false, tables: { feedback: 51 }, errors: [] }),
+    dbTable: async (table, offset, limit) => {
+      requests.push({ connectionKey, table, offset, limit });
+      return { table, offset, limit, total: 51, columns: ["user_id"],
+        rows: [{ cells: { user_id: "11" } }], users: {}, errors: [] };
+    },
+  };
+  const jsx = (type, props, key) => ({ type, props, key });
+  const tableSpecs = compile(await source("dbTables.ts"), {});
+  let masked = true;
+  const privacy = { MASK: "MASKED", usePrivacy: () => ({ enabled: masked, mask: () => "MASKED" }) };
+  const modules = {
+    "react/jsx-runtime": { jsx, jsxs: jsx },
+    "../api": { api, errorMessage: (error) => error.message },
+    "../privacy": privacy, "../dbTables": tableSpecs,
+    "../format": { formatNumber: String },
+    "../components/Collapse": { Collapse: "Collapse" },
+    "../components/ui": Object.fromEntries(["Card", "Button", "IconButton", "Notice", "Chip"].map((name) => [name, name])),
+    "../components/expressive": {},
+    "./DbTableDetail": { DbTableDetail: "DbTableDetail" },
+  };
+  const stableHooks = (runtime) => ({
+    ...runtime.hooks,
+    useCallback(callback, dependencies) {
+      const saved = runtime.hooks.useRef(null);
+      if (!saved.current || dependencies.some((value, i) => value !== saved.current.dependencies[i])) {
+        saved.current = { callback, dependencies };
+      }
+      return saved.current.callback;
+    },
+  });
+  const DataPage = compile(dataSource, { ...modules, react: stableHooks(parent) }).DataPage;
+  const detailSource = await source("pages/DbTableDetail.tsx");
+  let child, childKey, Detail, detailTree;
+  const onNames = () => {};
+  function nodes(node) {
+    if (Array.isArray(node)) return node.flatMap(nodes);
+    if (!node || typeof node !== "object") return [];
+    return [node, ...nodes(node.props?.children)];
+  }
+  const render = () => parent.render(DataPage, { connected: true, connectionKey, refreshToken: 0, onNames });
+  // Collapse の閉じる動きで子が残る場合も扱う。子のeffectを親より先に実行する。
+  const commit = async (tree) => {
+    const detail = nodes(tree).find((node) => node.type === "DbTableDetail");
+    if (!detail || childKey !== detail.key) {
+      child?.unmount();
+      child = null;
+    }
+    if (detail) {
+      if (!child) {
+        child = renderer();
+        childKey = detail.key;
+        Detail = compile(detailSource, { ...modules, react: stableHooks(child) }).DbTableDetail;
+      }
+      detailTree = child.render(Detail, detail.props);
+      child.commit();
+    }
+    parent.commit();
+    await Promise.resolve();
+    return detail;
+  };
+  const select = (tree) => {
+    const rows = nodes(tree).find((node) => node.type?.name === "TableRows");
+    assert.ok(rows);
+    rows.props.onSelect("feedback");
+  };
+  const originalFrame = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = () => 0;
+  try {
+    await commit(render());
+    assert.deepEqual(requests, []);
+    select(render());
+    await commit(render());
+    assert.deepEqual(requests.map((request) => request.connectionKey), ["A"]);
+
+    connectionKey = "B";
+    // 親の選択解除effect後の状態だけでなく、最初の子のeffectまで検証する。
+    await commit(render());
+    assert.deepEqual(requests.map((request) => request.connectionKey), ["A"]);
+    assert.equal(nodes(render()).some((node) => node.type === "DbTableDetail"), false);
+
+    select(render());
+    const detail = await commit(render());
+    assert.deepEqual(requests.map((request) => request.connectionKey), ["A", "B"]);
+    detailTree = child.render(Detail, detail.props);
+    const expand = nodes(detailTree).find((node) => node.props?.label === "この行の全部の列を見る");
+    expand.props.onClick({ stopPropagation() {} });
+    detailTree = child.render(Detail, detail.props);
+    assert.equal(nodes(detailTree).find((node) => node.type?.name === "DetailRow").props.open, true);
+    const cell = nodes(detailTree).find((node) => node.type?.name === "CellValue");
+    assert.ok(JSON.stringify(cell.type(cell.props)).includes("MASKED"));
+    masked = false;
+    assert.ok(JSON.stringify(cell.type(cell.props)).includes("11"));
+    assert.equal(JSON.stringify(cell.type(cell.props)).includes("MASKED"), false);
+    const next = nodes(detailTree).find((node) => node.props?.label === "次の 50 行");
+    assert.equal(next.props.disabled, false);
+    next.props.onClick();
+    await commit(render());
+    assert.deepEqual(requests.at(-1), { connectionKey: "B", table: "feedback", offset: 50, limit: 50 });
+    detailTree = child.render(Detail, detail.props);
+    assert.equal(nodes(detailTree).find((node) => node.type?.name === "DetailRow").props.open, false);
+
+    // 閉じるアニメーション用に保持した中身も、新接続へは引き継がない。
+    detail.props.onClose();
+    const closed = render();
+    assert.equal(nodes(closed).find((node) => node.type === "Collapse").props.open, false);
+    assert.ok(nodes(closed).some((node) => node.type === "DbTableDetail"));
+    const beforeSwitch = requests.length;
+    connectionKey = "C";
+    await commit(render());
+    assert.equal(requests.length, beforeSwitch);
+  } finally {
+    child?.unmount();
+    parent.unmount();
+    globalThis.requestAnimationFrame = originalFrame;
+  }
+});
+
 test("SSH設定に任せる場合もホーム所有者・パス・ラベルを伏せ字にする", () => {
   const harness = consoleHarness({});
   for (const home of ["home", "Users"]) {
