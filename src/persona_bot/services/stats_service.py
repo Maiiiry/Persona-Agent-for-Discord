@@ -666,6 +666,8 @@ class StatsService:
                         if summary:
                             lines.append(f"・性格推定: {summary}")
                         lines.append("※ これは発言からの推定であり、確定的な性格診断ではありません。")
+                    elif opted_out:
+                        lines.append("・性格推定: 統計収集を停止中のため、新しい解析は行っていません。")
                     else:
                         lines.append("・性格推定: 解析に失敗しました。時間をおいて再度お試しください。")
 

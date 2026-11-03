@@ -46,8 +46,26 @@ class StatsDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 self.interaction.followup.send.side_effect = RuntimeError("架空の送信失敗") if fails else None
                 await self.button.callback(self.interaction)
                 self.assertTrue(all(buffer.closed for buffer in buffers))
-                for file in self.interaction.followup.send.await_args.kwargs["files"]:
+                for file in self.interaction.followup.send.await_args_list[-2 if fails else -1].kwargs["files"]:
                     self.assertTrue(file.fp.closed)
+
+    async def test_followup_failures_preserve_the_first_result_and_report_privately(self) -> None:
+        for caption, images in (("あ" * 2100, []), ("架空の統計", [("graph.png", self.buffers[0])])):
+            with self.subTest(graph=bool(images)):
+                self.stats.build_dashboard.return_value = (caption, images)
+                self.interaction.edit_original_response.reset_mock()
+                self.interaction.followup.send.reset_mock()
+                self.interaction.followup.send.side_effect = [RuntimeError("架空の送信失敗"), None]
+                await self.button.callback(self.interaction)
+                self.interaction.edit_original_response.assert_awaited_once_with(content=caption[:2000], view=None)
+                self.assertIn("失敗", self.interaction.followup.send.await_args.args[0])
+                self.assertTrue(self.interaction.followup.send.await_args.kwargs["ephemeral"])
+
+    async def test_failed_failure_notice_keeps_result_and_closes_images(self) -> None:
+        self.interaction.followup.send.side_effect = RuntimeError("架空の送信失敗")
+        await self.button.callback(self.interaction)
+        self.interaction.edit_original_response.assert_awaited_once_with(content="架空の統計", view=None)
+        self.assertTrue(all(buffer.closed for buffer in self.buffers))
 
     async def test_generation_failure_replaces_busy_panel_with_error(self) -> None:
         self.stats.build_dashboard.side_effect = RuntimeError("架空の生成失敗")

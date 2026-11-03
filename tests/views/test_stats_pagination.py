@@ -62,7 +62,9 @@ class StatsPaginationTests(unittest.IsolatedAsyncioTestCase):
         self.interaction.followup.send.side_effect = OSError("架空の通信障害")
         await self.button(RunStatsButton).callback(self.interaction)
         self.assertTrue(buffer.closed)
-        self.assertIn("失敗", self.interaction.edit_original_response.call_args.kwargs["content"])
+        self.interaction.edit_original_response.assert_awaited_once_with(content="架" * 2000, view=None)
+        self.assertIn("失敗", self.interaction.followup.send.call_args.args[0])
+        self.assertTrue(self.interaction.followup.send.call_args.kwargs["ephemeral"])
 
     async def test_blank_caption_still_delivers_images_and_finishes_panel(self):
         buffer = io.BytesIO("架空の画像".encode())

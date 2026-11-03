@@ -506,6 +506,62 @@ class DocumentSummaryCompactionTests(unittest.IsolatedAsyncioTestCase):
         self.service._compact_memory = AsyncMock(return_value=({"note": "新しいプロフィール"}, {"note": "新しい記憶"}))
         return self.db.pending_fetch_entries("test-user")
 
+    async def test_pending_clear_resets_failure_count_before_repeated_cancellation(self) -> None:
+        for reason in ("blocked", "failures"):
+            with self.subTest(reason=reason):
+                entries = await self.prepare_compaction_save()
+                self.service._compact_memory = AsyncMock(
+                    side_effect=memory_service._PromptBlockedError() if reason == "blocked" else None,
+                    return_value=(None, None),
+                )
+                started, release = asyncio.Event(), threading.Event()
+                loop = asyncio.get_running_loop()
+                original_clear = self.db.pending_clear_upto
+
+                def delayed_clear(*args):
+                    original_clear(*args)
+                    loop.call_soon_threadsafe(started.set)
+                    if not release.wait(timeout=5):
+                        raise TimeoutError("架空の消去待機が終了しませんでした")
+
+                with patch.object(self.db, "pending_clear_upto", side_effect=delayed_clear):
+                    task = asyncio.create_task(self.service._flush_user("test-user", entries))
+                    try:
+                        await asyncio.wait_for(started.wait(), 3)
+                        self.assertEqual(self.db.pending_fetch_entries("test-user"), [])
+                        for _ in range(2):
+                            task.cancel()
+                            await asyncio.sleep(0)
+                            self.assertFalse(task.done())
+                            self.assertTrue(self.service.io_lock.locked())
+                        release.set()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await task
+                    finally:
+                        release.set()
+                        await asyncio.gather(task, return_exceptions=True)
+                self.assertEqual(self.service._compact_fail_count["test-user"], 0)
+                await self.service.append_pending_log("test-user", "新しい質問", "新しい応答")
+                self.service._compact_memory = AsyncMock(return_value=(None, None))
+                await self.service._flush_user("test-user", self.db.pending_fetch_entries("test-user"))
+                self.assertEqual(self.service._compact_fail_count["test-user"], 1)
+                self.assertEqual(len(self.db.pending_fetch_entries("test-user")), 1)
+                self.db.pending_clear_upto("test-user", self.db.pending_fetch_entries("test-user")[0]["id"])
+
+    async def test_failed_pending_clear_preserves_failure_count_and_entries(self) -> None:
+        for reason in ("blocked", "failures"):
+            with self.subTest(reason=reason):
+                entries = await self.prepare_compaction_save()
+                self.service._compact_memory = AsyncMock(
+                    side_effect=memory_service._PromptBlockedError() if reason == "blocked" else None,
+                    return_value=(None, None),
+                )
+                with patch.object(self.db, "pending_clear_upto", side_effect=OSError("架空の消去失敗")):
+                    with self.assertRaises(OSError):
+                        await self.service._flush_user("test-user", entries)
+                self.assertEqual(self.db.pending_fetch_entries("test-user"), entries)
+                self.assertEqual(self.service._compact_fail_count["test-user"], 2 if reason == "blocked" else 3)
+
     async def test_json_save_failure_rolls_back_profile_and_pending_log_then_retries(self) -> None:
         entries = await self.prepare_compaction_save()
         with patch.object(memory_service, "write_json_file", side_effect=OSError("架空のJSON保存失敗")):

@@ -402,7 +402,7 @@ class AutoTopicService:
         posted_key = f"{user_id}:{label}"
 
         for guild_id, guild_settings in list(self._state.guild_settings.items()):
-            if not guild_settings.auto_topic_enabled:
+            if not guild_settings.auto_topic_enabled or guild_settings.autonomous_session is not None:
                 continue
             if guild_settings.anniversary_posted_dates.get(posted_key) == today_str:
                 continue  # このサーバーでは今日すでに投稿済み
@@ -468,7 +468,8 @@ class AutoTopicService:
         label: str,
     ) -> bool:
         """お祝いメッセージを生成し、チャンネルへ投稿する。戻り値の意味は _post_topic と同様。"""
-        if (not guild_settings.auto_topic_enabled or channel.id not in guild_settings.auto_topic_channels
+        if (not guild_settings.auto_topic_enabled or guild_settings.autonomous_session is not None
+                or channel.id not in guild_settings.auto_topic_channels
                 or not self._can_send(channel) or not channel.permissions_for(member).view_channel):
             return False
 
@@ -488,7 +489,8 @@ class AutoTopicService:
         )
         full_prompt = build_anniversary_prompt(persona_prompt, member.display_name, label, history_text)
 
-        if (not guild_settings.auto_topic_enabled or channel.id not in guild_settings.auto_topic_channels
+        if (not guild_settings.auto_topic_enabled or guild_settings.autonomous_session is not None
+                or channel.id not in guild_settings.auto_topic_channels
                 or not self._can_send(channel) or not channel.permissions_for(member).view_channel):
             return False
 
@@ -505,7 +507,8 @@ class AutoTopicService:
             return False
 
         screened, done = await self._screen_auto_post(response_text, "記念日のお祝い")
-        if (not guild_settings.auto_topic_enabled or channel.id not in guild_settings.auto_topic_channels
+        if (not guild_settings.auto_topic_enabled or guild_settings.autonomous_session is not None
+                or channel.id not in guild_settings.auto_topic_channels
                 or not channel.permissions_for(member).view_channel):
             return False
         if not self._can_send(channel):

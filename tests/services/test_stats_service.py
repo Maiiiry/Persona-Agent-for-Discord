@@ -832,6 +832,37 @@ class StatsAnalysisTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(images, [])
         self.assertIsNone(self.service.cache["user-0"]["analysis"])
 
+    async def test_opted_out_personality_without_cache_explains_paused_analysis(self) -> None:
+        for item in ("all", "personality"):
+            with self.subTest(item=item):
+                self.seed(STATS_PERSONALITY_MIN_SAMPLES)
+                await self.service.set_opt_out("user-0", "架空の利用者", True)
+                caption, images = await self.dashboard(item)
+                self.assertIn("統計収集を停止中のため、新しい解析は行っていません", caption)
+                self.assertNotIn("解析に失敗", caption)
+                self.assertNotIn("stats_personality.png", images)
+                self.gemini.generate.assert_not_awaited()
+
+    async def test_opted_out_personality_keeps_existing_cache(self) -> None:
+        self.seed(STATS_PERSONALITY_MIN_SAMPLES)
+        await self.service.ensure_analysis("user-0")
+        self.gemini.generate.reset_mock()
+        await self.service.set_opt_out("user-0", "架空の利用者", True)
+        caption, images = await self.dashboard("personality")
+        self.assertIn("架空の推定", caption)
+        self.assertEqual(images, ["stats_personality.png"])
+        self.assertNotIn("新しい解析は行っていません", caption)
+        self.gemini.generate.assert_not_awaited()
+
+    async def test_collecting_personality_without_result_keeps_failure_notice(self) -> None:
+        self.seed(STATS_PERSONALITY_MIN_SAMPLES)
+        self.gemini.generate.side_effect = None
+        self.gemini.generate.return_value = ("", None, [])
+        caption, images = await self.dashboard("personality")
+        self.assertIn("解析に失敗", caption)
+        self.assertNotIn("停止中", caption)
+        self.assertEqual(images, [])
+
     async def test_few_sample_analysis_keeps_no_personality_and_refreshes_when_enough(self) -> None:
         self.seed(3)
         await self.dashboard("topic")

@@ -570,7 +570,7 @@ class MessageHandler:
                     reply_text += format_grounding_sources(grounding_sources, self.ng_filter)
 
                 # 送信の失敗は呼出元へ伝える。
-                sent = await send_long_reply(message, reply_text, suppress_embeds=bool(grounding_sources))
+                sent = await send_long_reply(message, reply_text, suppress_embeds=bool(accepted and grounding_sources))
                 # ★ ここから先は送信済みの返信に付随する処理。どれが失敗しても、送った本文は
                 # 呼出元へ返す（#157）。再生成・再送はしない（二重返信になるため）。
                 if accepted and emotion_changes is not None:

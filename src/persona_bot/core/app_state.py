@@ -313,6 +313,8 @@ class BotState:
     # 「同一プロセス内で万一イベントが重複して届いた場合」の保険にすぎないので、
     # auto_topic_channels と同じ「実行時に自然に再構築される一時状態」として扱う。
     welcomed_guild_ids: set[int] = field(default_factory=set)
+    # 退出処理中だけ保持する所有印。再参加で外し、古い後片付けを無効にする。
+    guild_removals: dict[int, object] = field(default_factory=dict, repr=False, compare=False)
     memory_background_started: bool = False
     document_worker_started: bool = False
     commands_synced: bool = False

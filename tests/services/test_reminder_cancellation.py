@@ -110,6 +110,52 @@ class ReminderCancellationTests(unittest.IsolatedAsyncioTestCase):
         channel.send.assert_not_awaited()
         channel.parent.send.assert_not_called()
 
+    async def test_cancellation_before_reopen_keeps_archived_thread_closed(self):
+        for stage in ("fetch", "previous_notification"):
+            with self.subTest(stage=stage):
+                if stage == "previous_notification":
+                    self.add_record("none")
+                reminder_id = self.add_record()
+                entered, release = asyncio.Event(), asyncio.Event()
+                thread = Mock(spec=discord.Thread, archived=True, locked=False, send=AsyncMock(), edit=AsyncMock())
+                thread.guild = SimpleNamespace(me=object())
+                thread.permissions_for.return_value = SimpleNamespace(view_channel=True, send_messages_in_threads=True)
+                thread.edit.return_value = thread
+
+                async def fetch(channel_id):
+                    entered.set()
+                    await release.wait()
+                    return thread
+
+                async def send(*args, **kwargs):
+                    entered.set()
+                    await release.wait()
+
+                self.channel.send.side_effect = send
+                self.client.get_channel.side_effect = None
+                self.client.get_channel.return_value = None
+                self.client.fetch_channel = AsyncMock(side_effect=fetch)
+                if stage == "previous_notification":
+                    self.client.get_channel.side_effect = [self.channel, thread]
+                task = self.start_check(release)
+                await asyncio.wait_for(entered.wait(), 3)
+                self.assertIsNotNone(await self.service.cancel(reminder_id, "11"))
+                release.set()
+                await task
+                thread.edit.assert_not_awaited()
+                thread.send.assert_not_awaited()
+
+    async def test_failed_pending_read_before_reopen_keeps_thread_closed(self):
+        self.add_record()
+        thread = Mock(spec=discord.Thread, archived=True, locked=False, send=AsyncMock(), edit=AsyncMock())
+        thread.guild = SimpleNamespace(me=object())
+        thread.permissions_for.return_value = SimpleNamespace(view_channel=True, send_messages_in_threads=True)
+        self.client.get_channel.return_value = thread
+        with patch.object(self.db, "reminder_is_pending", side_effect=OSError("架空の読込失敗")):
+            await self.service.run_due_checks()
+        thread.edit.assert_not_awaited()
+        thread.send.assert_not_awaited()
+
     async def test_cancel_queued_notification_while_another_reminder_is_sending(self):
         first = self.add_record()
         second = self.add_record("weekly")

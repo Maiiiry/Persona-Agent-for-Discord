@@ -438,10 +438,7 @@ class MemoryService:
             logger.warning("記憶圧縮: プロンプトがブロックされました。", exc_info=error)
             logger.warning("記憶圧縮: 処理不能な pending_log をクリアします。")
             async with self.io_lock:
-                await run_in_thread(self._db.pending_clear_upto, user_id, max_entry_id)
-            # 失敗回数は「今のログ」を何回圧縮し損ねたか。消したログの分を持ち越すと、
-            # 次の新しいログが一時エラー1回で上限に達し、圧縮されないまま消されてしまう。
-            self._compact_fail_count[user_id] = 0
+                await run_in_thread(self._clear_compact_pending, user_id, max_entry_id)
             return
         except Exception as error:
             await self._register_compact_failure(
@@ -461,6 +458,12 @@ class MemoryService:
             await run_in_thread(
                 self._save_compacted_memory, user_id, profile_data, projects_data, max_entry_id, profile_snapshot,
             )
+
+    def _clear_compact_pending(self, user_id: str, max_entry_id: int) -> None:
+        """ログ消去と失敗回数のリセットを、キャンセルで分断せずに完了する。"""
+        self._db.pending_clear_upto(user_id, max_entry_id)
+        # 消去が成功した場合だけ戻す。新しいログへ過去の失敗回数を持ち越さない。
+        self._compact_fail_count[user_id] = 0
 
     def _save_compacted_memory(
         self, user_id: str, profile_data: dict[str, Any], projects_data: dict[str, Any], max_entry_id: int,
@@ -557,8 +560,7 @@ class MemoryService:
         if count >= MEMORY_COMPACT_MAX_FAILURES:
             logger.warning("記憶圧縮: 連続失敗のため pending_log をクリアします。")
             async with self.io_lock:
-                await run_in_thread(self._db.pending_clear_upto, user_id, max_entry_id)
-            self._compact_fail_count[user_id] = 0
+                await run_in_thread(self._clear_compact_pending, user_id, max_entry_id)
 
     def _is_flush_required(self, entry_count: int, last_activity: str | None = None) -> bool:
         if entry_count >= MEMORY_FLUSH_THRESHOLD_ENTRIES:
