@@ -330,6 +330,7 @@ class SshSession:
         # 開始途中も保護する。create_process のキャンセルで参照を失う経路を作らない。
         task = asyncio.create_task(execute())
         canceled = False
+        finished_exit_status = None
         try:
             try:
                 result = await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
@@ -341,7 +342,8 @@ class SshSession:
                 # シェルだけを止めると git/pip が残り、巻き戻しと競合しうる。
                 state = CancellationState(canceled=canceled)
                 try:
-                    await await_shielded(task, state)
+                    completed = await await_shielded(task, state)
+                    finished_exit_status = completed.exit_status
                 except asyncio.CancelledError:
                     self.command_state_unknown = True
                     raise
@@ -361,7 +363,7 @@ class SshSession:
             raise CommandStateUnknownError(message) from error
         except SshError as error:
             message = str(error)
-            self._record(label, command, None, started, ok=False, error=message)
+            self._record(label, command, finished_exit_status, started, ok=False, error=message)
             raise
 
         exit_status = result.exit_status

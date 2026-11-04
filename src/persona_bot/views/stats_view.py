@@ -8,6 +8,7 @@ from persona_bot.services.feedback_service import FeedbackService, get_default_s
 from persona_bot.services.stats_service import StatsService
 from persona_bot.views.view_parts import (
     begin_panel_operation, confirm_panel_permission, edit_panel_message, panel_operation_is_current,
+    report_panel_failure, send_panel_result,
     BackButton, HubFactory, PanelView,
     select_option_text, send_graph_ephemeral,
 )
@@ -36,15 +37,10 @@ class StatsItemSelect(ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: "StatsView" = self.view  # type: ignore[assignment]
-        operation = begin_panel_operation(view, interaction)
-        if operation is not None and not operation.is_current():
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
-            return
-        view.refresh_permissions(interaction.user)
-        view.temp_item = self.values[0]
-        view.refresh_items()
-        await edit_panel_message(interaction, content=view.build_preview(), view=view)
+        def update() -> None:
+            view.refresh_permissions(interaction.user)
+            view.temp_item = self.values[0]
+        await view.update_preview(interaction, update)
 
 
 class StatsUserSelect(ui.Select):
@@ -70,16 +66,11 @@ class StatsUserSelect(ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: "StatsView" = self.view  # type: ignore[assignment]
-        operation = begin_panel_operation(view, interaction)
-        if operation is not None and not operation.is_current():
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
-            return
-        view.refresh_permissions(interaction.user)
-        if view.is_admin:
-            view.temp_target_id = self.values[0]
-        view.refresh_items()
-        await edit_panel_message(interaction, content=view.build_preview(), view=view)
+        def update() -> None:
+            view.refresh_permissions(interaction.user)
+            if view.is_admin:
+                view.temp_target_id = self.values[0]
+        await view.update_preview(interaction, update)
 
 
 class RunStatsButton(ui.Button):
@@ -110,7 +101,7 @@ class RunStatsButton(ui.Button):
         # 「選んだ後に相手が停止した」場合はパネルが開いたままなので到達しうる。
         images = []
         files = []
-        result_shown = False
+        result_shown = [False]
         try:
             caption, images = await view.stats.build_dashboard(
                 target_id, item, viewer_id=view.viewer_id
@@ -127,30 +118,16 @@ class RunStatsButton(ui.Button):
             # 途中の生成失敗でも、それまでに作成したFileをfinallyで回収する。
             for filename, buffer in images:
                 files.append(discord.File(buffer, filename=filename))
-            chunks = split_message(caption) or ["表示できる統計の本文がありません。"]
-            if not await edit_panel_message(interaction, deferred=True, content=chunks[0]):
+            if not await send_panel_result(interaction, caption, result_shown, fallback="表示できる統計の本文がありません。"):
                 return
-            result_shown = True
-            for chunk in chunks[1:]:
-                await interaction.followup.send(chunk, ephemeral=True)
             if files:
                 # グラフ画像は本人だけに見えるエフェメラルの followup として送る。
                 await interaction.followup.send(files=files, ephemeral=True)
         except Exception as error:
             logger.error("会話統計の生成・送信中にエラーが発生しました。", exc_info=error)
-            notice = "エラー: 統計の表示に失敗しました。"
-            if not panel_operation_is_current(view, interaction):
-                return
-            if not result_shown:
-                try:
-                    await edit_panel_message(interaction, deferred=True, content=notice, view=None)
-                    return
-                except Exception as notice_error:
-                    logger.warning("会話統計: 失敗の案内をパネルに表示できませんでした。", exc_info=notice_error)
-            try:
-                await interaction.followup.send(notice, ephemeral=True)
-            except Exception as notice_error:
-                logger.error("会話統計: 失敗の案内を送れませんでした。", exc_info=notice_error)
+            await report_panel_failure(
+                interaction, "エラー: 統計の表示に失敗しました。", keep_result=result_shown[0], label="会話統計",
+            )
         finally:
             # discord.Fileが差し替えたcloseを戻してから、元のバッファを閉じる。
             for file in files:

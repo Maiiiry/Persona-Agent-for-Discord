@@ -54,6 +54,21 @@ class GuildRejoinTests(unittest.IsolatedAsyncioTestCase):
     async def remove(self, guild_id: int) -> None:
         await remove_guild_state(guild_id, self.state, self.stop, self.guard)
 
+    async def test_bulk_restore_reads_settings_and_posts_together(self):
+        await self.save_settings(1)
+        await self.save_settings(None)
+        expected_settings = self.db.guild_settings_load_all()
+        expected_posts = self.db.anniversary_posts_load_all()
+        with patch.object(self.db, "guild_state_load_all", wraps=self.db.guild_state_load_all) as load:
+            restored = BotState()
+            restored.restore_from_database(self.db)
+        load.assert_called_once_with()
+        values, posts = self.db.guild_state_load_all()
+        self.assertEqual(values, expected_settings)
+        self.assertEqual(posts, expected_posts)
+        self.assertEqual(restored.get_guild(1).anniversary_posted_dates, expected_posts[1])
+        self.assertEqual(restored.dm_settings.anniversary_posted_dates, expected_posts[0])
+
     async def test_rejoin_restores_every_saved_setting_before_one_item_is_changed(self) -> None:
         removed = await self.save_settings(1)
         other = await self.save_settings(2)

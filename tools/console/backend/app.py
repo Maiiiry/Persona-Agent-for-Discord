@@ -193,7 +193,7 @@ async def get_status() -> dict:
         session.run(rc.git_command(profile.bot_dir), label="Git"),
         return_exceptions=True,
     )
-    if generation != session.generation:
+    if generation != session.generation or not session.connected:
         raise NotConnectedError("状態の取得中に SSH 接続が変わりました。接続先を確認して更新してください。")
     if isinstance(ping, BaseException):
         raise ping  # 疎通確認すら失敗 = 接続が使えない
@@ -527,7 +527,7 @@ def _invalidate_insights() -> None:
 
 
 async def _read_json_command(command: str, *, generation: int, changed: str, failed: str,
-                             malformed: str, require_connected: bool = False, validate=None, **options) -> dict:
+                             malformed: str, require_connected: bool = True, validate=None, **options) -> dict:
     """接続先の世代を確認し、遠隔スクリプトの最終行を読み取る。"""
     result = await session.run(command, **options)
     if generation != session.generation or (require_connected and not session.connected):

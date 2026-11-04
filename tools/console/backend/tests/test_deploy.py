@@ -102,6 +102,22 @@ class DeployTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await runner._step("restart", runner._restart))
         self.assertFalse(self.sent("systemctl restart"))
 
+    async def test_cancel_service_job_wait_propagates_cancellation(self):
+        runner = DeployRunner(self.session, self.profile, new_record(1, self.profile), **FAST)
+        entered = asyncio.Event()
+
+        async def wait(*args, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+        with patch.object(self.session, "run", side_effect=wait):
+            task = asyncio.create_task(runner._wait_for_service_job())
+            await entered.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertFalse(self.session.command_state_unknown)
+
     async def test_rollback_waits_for_systemd_job_before_changing_code(self):
         runner = DeployRunner(self.session, self.profile, new_record(1, self.profile), **FAST)
         runner._restart_attempted = True
@@ -372,6 +388,34 @@ class DeployTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sent("git reset"), [])
         self.assertIn("変えていません", record.message)
 
+    async def test_cancelled_merge_without_update_rechecks_head_and_does_not_reset(self):
+        before = self.repo.head
+        original = self.session.run
+
+        async def run(command, **kwargs):
+            if "git merge --ff-only" in command:
+                raise asyncio.CancelledError
+            return await original(command, **kwargs)
+
+        record = new_record(1, self.profile)
+        with patch.object(self.session, "run", side_effect=run):
+            with self.assertRaises(asyncio.CancelledError):
+                await DeployRunner(self.session, self.profile, record, **FAST).run()
+        self.assertEqual(record.after_commit, before)
+        self.assertEqual(record.status, "failed")
+        self.assertEqual(self.sent("git reset"), [])
+
+    async def test_restart_rejects_crash_or_increased_restart_count(self):
+        for active, sub, restarts in (("failed", "failed", 0), ("inactive", "dead", 0),
+                                      ("activating", "auto-restart", 0), ("active", "running", 1)):
+            with self.subTest(active=active, sub=sub, restarts=restarts):
+                runner = DeployRunner(self.session, self.profile, new_record(1, self.profile), **FAST)
+                before = {"main_pid": 10, "restarts": 0}
+                after = {"main_pid": 11, "restarts": restarts, "active_state": active, "sub_state": sub}
+                with patch.object(runner, "_service", new=AsyncMock(side_effect=[before, after])), \
+                     patch.object(runner, "_run", new=AsyncMock(side_effect=[CommandResult("100", "", 0, 0), CommandResult("", "", 0, 0)])):
+                    self.assertFalse(await runner._step("restart", runner._restart))
+
     async def test_unreachable_head_and_rollback_do_not_claim_no_changes(self):
         record = await self.lost_pull_response(unreachable=True)
         self.assertEqual(record.status, "rollback_failed", record.message)
@@ -592,6 +636,7 @@ class DeployTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.repo.head, before)
         keys = [step.key for step in record.steps]
         self.assertEqual(len(keys), len(set(keys)))
+        self.assertEqual(len(self.sent("git reset --hard")), 1)
 
     async def test_canceled_rollback_exception_finishes_record_and_notifies(self):
         """中断後の巻き戻しが例外でも失敗を確定し、通知・排他解放後にキャンセルを伝える。"""

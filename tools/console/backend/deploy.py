@@ -144,6 +144,7 @@ class DeployRunner:
         self._code_changed = False
         self._deps_changed = False
         self._restart_attempted = False
+        self._rollback_started = False
         # 直前の再起動の時刻（サーバーの UNIX 秒）と、そのときの自動再起動の回数。ヘルスチェックが使う
         self._since = 0
         self._restarts_after: int | None = None
@@ -177,6 +178,8 @@ class DeployRunner:
         self._finish("unknown", "遠隔処理の終了を確認できず、状態不明です。デプロイ・巻き戻し・サービス操作を停止します。読み取りと再接続は利用できます。" + detail)
 
     async def _recover_canceled(self) -> None:
+        if self._rollback_started:
+            return
         for step in self.record.steps:
             if step.status == "running":
                 step.status = "failed"
@@ -208,7 +211,20 @@ class DeployRunner:
             if not self._code_changed:
                 self._finish("failed", "コードの取り込みで止めました。コードもボットも変えていません。")
                 return
-            await self._rollback()
+            state = CancellationState()
+            task = asyncio.create_task(self._rollback())
+            try:
+                await await_shielded(task, state)
+            except Exception as error:
+                if not state.canceled:
+                    raise
+                if isinstance(error, CommandStateUnknownError) or self.session.command_state_unknown:
+                    self._finish_unknown(str(error))
+                else:
+                    self._finish("failed", f"中断中の巻き戻しに失敗しました（{type(error).__name__}）。")
+                raise asyncio.CancelledError from error
+            if state.canceled:
+                raise asyncio.CancelledError
             return
 
         count = len(self.record.commits)
@@ -345,6 +361,11 @@ class DeployRunner:
         self._code_changed = True
         try:
             result = await self._run(step, rc.deploy_merge_command(bot_dir, branch), label="git pull（早送り）", timeout=FETCH_TIMEOUT)
+        except asyncio.CancelledError:
+            if not self.session.command_state_unknown:
+                task = asyncio.create_task(self._check_pull_result(step, before))
+                await await_shielded(task, CancellationState(canceled=True))
+            raise
         except CommandStateUnknownError:
             raise  # 未終了の更新とHEAD確認・巻き戻しを並行させない。
         except SshError:
@@ -439,6 +460,10 @@ class DeployRunner:
         while True:
             state = await self._service(step, quiet=True)
             polls += 1
+            if (state["active_state"] in ("failed", "inactive") or state["sub_state"] == "auto-restart"
+                    or (state["restarts"] is not None and before["restarts"] is not None
+                        and state["restarts"] > before["restarts"])):
+                raise StepFailed("ボットが起動の途中で停止または自動再起動しました。")
             running = state["active_state"] == "active" and state["sub_state"] == "running"
             if running and state["main_pid"] and state["main_pid"] != old_pid:
                 break
@@ -557,13 +582,16 @@ class DeployRunner:
                 if rc.parse_service_job(result.stdout) == 0:
                     return
                 await asyncio.sleep(min(0.5, max(0, deadline - time.monotonic())))
-        except (Exception, asyncio.CancelledError) as error:
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
             self.session.command_state_unknown = True
             raise CommandStateUnknownError(
                 "systemd ジョブの終了を確認できないため、巻き戻しを停止しました。サーバーの状態を確認してください。"
             ) from error
 
     async def _rollback(self) -> None:
+        self._rollback_started = True
         if self._restart_attempted:
             await self._wait_for_service_job()
         for key, title, description in ROLLBACK_STEPS:

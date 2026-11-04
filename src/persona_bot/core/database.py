@@ -724,6 +724,17 @@ class Database:
             for name, _, kind, _ in GUILD_SETTINGS_FIELDS
         }
 
+    def guild_state_load_all(self) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, str]]]:
+        """起動時の設定と投稿記録を同じロック内で読み出す。"""
+        with self._lock:
+            settings = self._conn.execute("SELECT * FROM guild_settings").fetchall()
+            posts = self._conn.execute("SELECT * FROM anniversary_posts").fetchall()
+        values = {row["guild_id"]: self._guild_settings_values(row) for row in settings}
+        posted: dict[int, dict[str, str]] = {}
+        for row in posts:
+            posted.setdefault(row["guild_id"], {})[f"{row['user_id']}:{row['label']}"] = row["posted_date"]
+        return values, posted
+
     def guild_state_load(self, guild_id: int) -> tuple[dict[str, Any], dict[str, str]]:
         """1サーバー分の設定と記念日の投稿記録を、同じロック内で読み出す。
 

@@ -55,6 +55,8 @@ export function useConsoleShortcuts({
       return;
     }
 
+    if (modalRailOpen && !goPending && !/^[1-6jk]$/.test(event.key)) return;
+
     if (goPending) {
       cancelGo();
       const destination = PAGES.find((p) => p.goKey === event.key);
@@ -79,9 +81,11 @@ export function useConsoleShortcuts({
         goTimer.current = window.setTimeout(() => setGoPending(false), GO_KEY_TIMEOUT_MS);
         break;
       case "j":
+        setModalRailOpen(false);
         navigate(PAGES[(index + 1) % PAGES.length].id);
         break;
       case "k":
+        setModalRailOpen(false);
         navigate(PAGES[(index - 1 + PAGES.length) % PAGES.length].id);
         break;
       case "r":

@@ -39,6 +39,17 @@ test("ショートカットは最新状態を使い、終了時にリスナー�
     assert.equal(refreshed.length, 0);
     key("r");
     assert.equal(refreshed.length, 1);
+    options.modalRailOpen = true;
+    const closes = [];
+    options.setModalRailOpen = (value) => closes.push(value);
+    render();
+    key("r");
+    assert.equal(refreshed.length, 1);
+    key("j");
+    assert.deepEqual(closes, [false]);
+    assert.equal(pages.at(-1), "logs");
+    options.modalRailOpen = false;
+    render();
     key("g");
     assert.ok(timer);
     cleanup();

@@ -76,6 +76,8 @@ class Upsampler:
     _RATIO = TTS_SAMPLE_RATE // LIVE_OUTPUT_SAMPLE_RATE
 
     def __init__(self) -> None:
+        if self._RATIO != 2 or TTS_SAMPLE_RATE % LIVE_OUTPUT_SAMPLE_RATE:
+            raise ValueError("音声出力の補間には正確な2倍のサンプルレートが必要です。")
         self._last = 0.0
         self._pending = b""
 
@@ -89,8 +91,8 @@ class Upsampler:
         samples = np.frombuffer(data[:usable], dtype=np.int16).astype(np.float32)
         joined = np.concatenate(([self._last], samples))
         output = np.empty(samples.size * self._RATIO, dtype=np.float32)
-        output[0::2] = joined[:-1]
-        output[1::2] = (joined[:-1] + joined[1:]) / 2
+        output[0::self._RATIO] = joined[:-1]
+        output[1::self._RATIO] = (joined[:-1] + joined[1:]) / self._RATIO
         self._last = float(samples[-1])
         mono = np.clip(np.rint(output), PCM_INT16_MIN, PCM_INT16_MAX).astype(np.int16)
         return np.repeat(mono, TTS_CHANNELS).tobytes()

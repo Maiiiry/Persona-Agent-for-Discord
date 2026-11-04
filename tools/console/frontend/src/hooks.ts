@@ -191,13 +191,15 @@ const FOCUSABLE =
  * 開いたら中へフォーカスを移し、Tab / Shift+Tab を中で循環させ、閉じたら開く前の場所へ戻す。
  */
 export function useModalFocus(open: boolean, containerRef: RefObject<HTMLElement | null>, initialFocusRef?: RefObject<HTMLElement | null>) {
+  const latestInitialFocusRef = useRef(initialFocusRef);
+  latestInitialFocusRef.current = initialFocusRef;
   useEffect(() => {
     if (!open) return;
     const previous = document.activeElement as HTMLElement | null;
     const container = containerRef.current;
     // 開く動きが始まってからフォーカスする（スクロール位置が飛ばないよう preventScroll）
     const timer = window.setTimeout(() => {
-      const target = initialFocusRef?.current ?? container?.querySelector<HTMLElement>(FOCUSABLE);
+      const target = latestInitialFocusRef.current?.current ?? container?.querySelector<HTMLElement>(FOCUSABLE);
       target?.focus({ preventScroll: true });
     }, 60);
 
@@ -221,7 +223,7 @@ export function useModalFocus(open: boolean, containerRef: RefObject<HTMLElement
       window.removeEventListener("keydown", onKeyDown);
       if (previous && document.contains(previous)) previous.focus({ preventScroll: true });
     };
-  }, [open, containerRef, initialFocusRef]);
+  }, [open, containerRef]);
 }
 
 const FLUSH_INTERVAL_MS = 120;
@@ -273,6 +275,8 @@ export function useLogStream(enabled: boolean, initialLines = 300, connectionKey
     bufferRef.current = [];
     heldRef.current = [];
     heldCountRef.current = 0;
+    pausedRef.current = false;
+    setPausedState(false);
     setEntries([]);
     setPendingCount(0);
     setStatus("connecting");
@@ -370,7 +374,9 @@ export function useLogStream(enabled: boolean, initialLines = 300, connectionKey
     pausedRef.current = next;
     setPausedState(next);
     if (!next) {
-      bufferRef.current = appendLogEntries(bufferRef.current, heldRef.current);
+      const batch = appendLogEntries(bufferRef.current, heldRef.current);
+      bufferRef.current = [];
+      if (batch.length > 0) setEntries((previous) => appendLogEntries(previous, batch));
       heldRef.current = [];
       heldCountRef.current = 0;
       setPendingCount(0);

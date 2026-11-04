@@ -50,16 +50,10 @@ class StatsCollectToggleButton(ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: "StatsPrivacyView" = self.view  # type: ignore[assignment]
-        operation = begin_panel_operation(view, interaction)
-        if operation is not None and not operation.is_current():
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
-            return
-        view.temp_collect_enabled = not view.temp_collect_enabled
-        # トグルし直したら削除の確認状態は解除する（別操作を巻き込まないため）
-        view.delete_confirmed = False
-        view.refresh_items()
-        await edit_panel_message(interaction, content=view.build_preview(), view=view)
+        def update() -> None:
+            view.temp_collect_enabled = not view.temp_collect_enabled
+            view.delete_confirmed = False
+        await view.update_preview(interaction, update)
 
 
 class StatsPrivacyConfirmButton(ui.Button):
@@ -103,13 +97,15 @@ class StatsDataDeleteButton(ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: "StatsPrivacyView" = self.view  # type: ignore[assignment]
-        begin_panel_operation(view, interaction)
+        operation = begin_panel_operation(view, interaction)
+        if operation is not None and not operation.is_current():
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+            return
 
         if not view.delete_confirmed:
-            # 1回目は確認を促すだけ。DB には触らない（View の一時状態のみ）。
-            view.delete_confirmed = True
-            view.refresh_items()
-            await edit_panel_message(interaction, content=view.build_preview(), view=view)
+            # 1回目は確認を促すだけ。DB には触らない。
+            await view.update_preview(interaction, lambda: setattr(view, "delete_confirmed", True))
             return
 
         # 削除するのは実行者本人の分だけ（他人のIDを指定できる経路は作らない）。

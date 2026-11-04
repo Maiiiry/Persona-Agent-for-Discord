@@ -75,6 +75,7 @@ class SshCleanupTests(unittest.IsolatedAsyncioTestCase):
             await task
         self.assert_reclaimed()
         self.assertFalse(self.session.history[-1].ok)
+        self.assertEqual(self.session.history[-1].exit_status, 0)
 
     async def test_repeated_cancellation_waits_for_actual_exit(self):
         """繰り返しキャンセルでも、遠隔処理とチャネルを回収してから伝える。"""
