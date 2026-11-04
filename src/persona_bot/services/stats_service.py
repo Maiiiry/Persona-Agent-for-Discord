@@ -120,6 +120,7 @@ class _AnalysisFlight:
     version: int
     task: asyncio.Task | None = None
     waiters: int = 0
+    saved: bool = False
 
 
 class StatsService:
@@ -393,7 +394,8 @@ class StatsService:
             flight = self._analysis_tasks.get(user_id)
             if (flight is None and observed_flight is not None
                     and observed_flight.version == version and observed_flight.samples == samples
-                    and observed_flight.task.done() and not observed_flight.task.cancelled()):
+                    and observed_flight.task.done() and not observed_flight.task.cancelled()
+                    and observed_flight.saved):
                 # 保存ロックを待つ間に完了した解析も、この要求の実行中処理として共有する。
                 return deepcopy(entry.get("analysis"))
             if (flight is None or flight.version != version or flight.samples != samples
@@ -474,14 +476,16 @@ class StatsService:
                 return None
             # LLM待機中の削除・停止・再開をまたいだ結果は反映しない。
             if (analysis is None or flight.version != self._analysis_versions.get(user_id, 0)
-                    or self._analysis_tasks.get(user_id) is not flight
                     or self._entry_opted_out(entry)):
                 return deepcopy(entry.get("analysis"))
+            if self._analysis_tasks.get(user_id) is not flight:
+                return deepcopy(entry.get("analysis") or analysis)
             candidate = deepcopy(entry)
             candidate["analysis"] = analysis
             if not await self._save_user_locked(user_id, candidate):
                 return deepcopy(entry.get("analysis"))
             self.cache[user_id] = candidate
+            flight.saved = True
         return analysis
 
     @staticmethod

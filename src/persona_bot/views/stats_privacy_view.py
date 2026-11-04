@@ -50,7 +50,11 @@ class StatsCollectToggleButton(ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: "StatsPrivacyView" = self.view  # type: ignore[assignment]
-        begin_panel_operation(view, interaction)
+        operation = begin_panel_operation(view, interaction)
+        if operation is not None and not operation.is_current():
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+            return
         view.temp_collect_enabled = not view.temp_collect_enabled
         # トグルし直したら削除の確認状態は解除する（別操作を巻き込まないため）
         view.delete_confirmed = False

@@ -85,6 +85,19 @@ class DocumentLifecycleTests(unittest.IsolatedAsyncioTestCase):
             row = self.db._conn.execute("SELECT status FROM queue_tasks WHERE task_id = ?", (self.task["task_id"],)).fetchone()
         self.assertEqual(row["status"], "completed")
 
+    async def test_missing_persona_prevents_attachment_upload(self):
+        self.loader.side_effect = FileNotFoundError("架空のパス")
+        await self.service._process_task(self.task)
+        self.service._process_attachment.assert_not_awaited()
+        self.message.reply.assert_awaited_once()
+
+    async def test_failure_notice_masks_user_filename(self):
+        self.service._ng_filter = SimpleNamespace(mask_with_log=Mock(return_value="マスク済み"))
+        self.service._process_attachment.side_effect = DocumentUserError("架空のファイル名")
+        await self.service._process_task(self.task)
+        self.message.reply.assert_awaited_once()
+        self.assertEqual(self.message.reply.await_args.args[0], "マスク済み")
+
     async def test_all_four_attachment_summaries_are_present_in_final_prompt(self) -> None:
         await self.service._process_task(self.task)
         prompt = self.gemini.generate.await_args.args[0]

@@ -291,6 +291,8 @@ class VoiceReceiver:
 
         # 接続鍵の変更も通番判定より先に検知する。デコーダは UDP のスレッドでだけ入れ替える。
         box = self._transport_box(connection)
+        if box is None:
+            return None
         state = self._decoders.get(packet.ssrc)
         if state is not None and state.stream != stream:
             self._decoders.pop(packet.ssrc, None)
@@ -316,7 +318,10 @@ class VoiceReceiver:
         return (user_id, converted) if converted else None
 
     def _transport_box(self, connection: Any) -> Any:
-        key = bytes(connection.secret_key)
+        raw_key = getattr(connection, "secret_key", None)
+        if nacl is None or not isinstance(raw_key, (bytes, bytearray, list, tuple)) or len(raw_key) != 32:
+            return None
+        key = bytes(raw_key)
         if self._box is None or self._box_key != key:
             # 再接続で鍵が変わったら作り直す。
             self._box = nacl.secret.Aead(key)

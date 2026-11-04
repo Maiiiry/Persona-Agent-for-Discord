@@ -27,6 +27,11 @@ async def remove_guild_state(
     removal = object()
     state.guild_removals[guild_id] = removal
     settings = state.guild_settings.get(guild_id)
+    if settings is not None:
+        settings._active = False
+    loading = state._guild_loads.get(guild_id)
+    if loading is not None:
+        loading.valid = False
 
     def is_current() -> bool:
         return (state.guild_removals.get(guild_id) is removal

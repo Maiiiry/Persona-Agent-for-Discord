@@ -191,6 +191,7 @@ class _SpeakerState:
         return "begin", participant
 
     def request_floor(self, user_id: int, now: float) -> None:
+        self._expire_reservations(now)
         if any(queued == user_id for queued, _ in self.reservations):
             return
         if len(self.reservations) < LIVE_SPEAKER_QUEUE_MAX:
@@ -200,11 +201,14 @@ class _SpeakerState:
         self.reservations = deque(item for item in self.reservations if item[0] != user_id)
 
     def floor_available(self, user_id: int, now: float) -> bool:
-        while self.reservations and self.reservations[0][1] < now:
-            self.reservations.popleft()
+        self._expire_reservations(now)
         return not self.reservations or self.reservations[0][0] == user_id
 
+    def _expire_reservations(self, now: float) -> None:
+        self.reservations = deque(item for item in self.reservations if item[1] > now)
+
     def extend_reservations(self, now: float) -> None:
+        self._expire_reservations(now)
         self.reservations = deque(
             (user_id, now + LIVE_SPEAKER_REQUEST_TTL_SECONDS) for user_id, _ in self.reservations
         )
@@ -342,6 +346,8 @@ class VoiceConversation:
         if self._stopped:
             return
         self._stopped = True
+        if self._current is not None:
+            self._discard_response(self._current, "音声会話の停止")
         current = asyncio.current_task()
         for task in self._tasks:
             if task is not current:
@@ -397,6 +403,8 @@ class VoiceConversation:
             spawn(self._live.restart_fresh(), label="音声会話の文脈の破棄")
         if self._active_user == user_id:
             self._end_activity(discard=True)
+        if self._current is not None and self._current.user_id == user_id:
+            self._discard_response(self._current, "同意の撤回")
         self._participants.pop(user_id, None)
         self._remove_reservation(user_id)
         self._after_consent_change()
@@ -428,6 +436,8 @@ class VoiceConversation:
         if before_id == self.channel_id:
             if self._active_user == member.id:
                 self._end_activity(discard=True)
+            if self._current is not None and self._current.user_id == member.id:
+                self._discard_response(self._current, "チャンネルから退出")
             self._participants.pop(member.id, None)
             self._remove_reservation(member.id)
         self._update_gate()
@@ -874,6 +884,8 @@ class VoiceConversation:
         if not utterance.discarded:
             logger.info("音声会話: 返答を破棄しました（%s）。", reason)
         utterance.discarded = True
+        if utterance.input_task is not None and utterance.input_task is not asyncio.current_task():
+            utterance.input_task.cancel()
         if self._playback_owner is utterance:
             self._abort_playback()
 
@@ -917,13 +929,13 @@ class VoiceConversation:
     async def _judge_input(self, utterance: _Utterance) -> None:
         """話し終わった発言の文字起こしが出そろうのを待って、AI モデレーションに掛ける。"""
         waited = 0.0
-        while waited < LIVE_INPUT_TRANSCRIPT_MAX_WAIT_SECONDS:
+        while not self._stopped and not utterance.discarded and waited < LIVE_INPUT_TRANSCRIPT_MAX_WAIT_SECONDS:
             quiet = self._now() - utterance.input_updated_at
             if utterance.transcript_closed or (utterance.input_text and quiet >= LIVE_INPUT_TRANSCRIPT_SETTLE_SECONDS):
                 break
             await asyncio.sleep(LIVE_TICK_SECONDS)
             waited += LIVE_TICK_SECONDS
-        while not self._stopped:
+        while not self._stopped and not utterance.discarded:
             text = utterance.input_text
             verdict = await self._service.moderator.judge_voice_input(text)
             utterance.input_verdict = verdict
@@ -969,6 +981,7 @@ class VoiceConversation:
         if user_id in self.consent.memory:
             try:
                 await self._service.memory.append_pending_log(key, utterance.input_text, utterance.output_text)
+                spawn(self._service.memory.flush_if_needed(), label="音声会話の記憶圧縮")
             except Exception as error:
                 logger.error("音声会話: 記憶への追記に失敗しました。", exc_info=error)
         if user_id in self.consent.affinity and utterance.emotion is not None:

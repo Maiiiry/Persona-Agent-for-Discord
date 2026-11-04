@@ -478,6 +478,9 @@ class ReminderService:
                 return
 
         if isinstance(channel, discord.Thread) and channel.archived:
+            if guild is None or guild.me is None:
+                logger.warning("リマインダー: スレッドの権限を確認できません。")
+                return
             # 取消済みの系列は、通知だけでなくスレッドの再開も行わない。
             # 再開の通信中は従来どおり取消を受け付け、送信直前にも再確認する。
             if record.get("next_remind_at"):

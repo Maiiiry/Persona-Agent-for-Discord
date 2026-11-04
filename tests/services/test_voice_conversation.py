@@ -90,7 +90,7 @@ class ConversationTestBase(unittest.IsolatedAsyncioTestCase):
             ng_filter=SimpleNamespace(contains_ng_word=lambda text: any(w in text for w in self.ng_words)),
             moderator=self.moderator,
             blacklist=SimpleNamespace(record_violation=AsyncMock(return_value=(1, False))),
-            memory=SimpleNamespace(append_pending_log=AsyncMock()),
+            memory=SimpleNamespace(append_pending_log=AsyncMock(), flush_if_needed=AsyncMock()),
             affinity=SimpleNamespace(update_emotion=Mock(), save_background=AsyncMock()),
             usage=SimpleNamespace(log_tokens=Mock()),
             end=AsyncMock(),
@@ -207,6 +207,15 @@ class GateTests(ConversationTestBase):
 
 
 class SpeakerTests(ConversationTestBase):
+    async def test_expired_reservations_do_not_revive_or_block_new_requests(self):
+        speaker = self.conversation._speaker_state
+        speaker.request_floor(USER_A, 0)
+        expired = constants.LIVE_SPEAKER_REQUEST_TTL_SECONDS + 1
+        speaker.extend_reservations(expired)
+        self.assertFalse(speaker.reservations)
+        speaker.request_floor(USER_B, expired)
+        self.assertTrue(speaker.floor_available(USER_B, expired))
+
     async def asyncSetUp(self):
         await super().asyncSetUp()
         self.consent_all()
@@ -306,6 +315,16 @@ class SpeakerTests(ConversationTestBase):
 
 
 class ResponseTests(ConversationTestBase):
+    async def test_withdrawal_discards_response_after_speech_ends(self):
+        self.consent_all()
+        await self.complete_utterance()
+        turn = self.conversation._current
+        self.assertIsNone(self.conversation._active_user)
+        self.conversation.withdraw(USER_A)
+        self.assertTrue(turn.discarded)
+        await self.settle()
+        self.service.memory.append_pending_log.assert_not_awaited()
+
     async def asyncSetUp(self):
         await super().asyncSetUp()
         self.consent_all()

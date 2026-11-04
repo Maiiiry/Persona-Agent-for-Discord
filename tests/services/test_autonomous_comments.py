@@ -413,7 +413,7 @@ class AutonomousCommentAdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.moderator.check.return_value = (False, "架空の判定")
         await self.on_message(self.message)
         self.moderator.check.assert_awaited_once()
-        self.assertEqual(self.sent.await_args.args[1], "申し訳ありませんが、適切な応答を生成できませんでした。")
+        self.sent.assert_not_awaited()
 
     async def end_session_during_input(self, *args):
         self.settings.autonomous_session = None

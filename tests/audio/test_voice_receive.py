@@ -147,6 +147,13 @@ class LiveVoiceClientTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ReceiverTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unready_key_drops_packet_without_exception(self):
+        from discord.utils import MISSING
+        receiver = self.make_receiver()
+        self.connection.secret_key = MISSING
+        self.assertIsNone(receiver._decode_packet(encrypt_packet(b"opus")))
+        self.assertEqual(receiver._dropped, 0)
+
     def make_receiver(self, *, dave_session=None, dave_version=0):
         self.connection = SimpleNamespace(
             mode="aead_xchacha20_poly1305_rtpsize", secret_key=list(KEY),

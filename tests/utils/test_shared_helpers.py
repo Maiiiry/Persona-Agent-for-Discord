@@ -224,7 +224,7 @@ class LongMessageTests(unittest.IsolatedAsyncioTestCase):
         text = "あ" * 4001
         for private in (False, True):
             with self.subTest(private=private):
-                view = discord.ui.View()
+                view = view_parts.PanelView(timeout_notice="時間切れ")
                 self.addCleanup(view.stop)
                 for key, value in {
                     "temp_private": private, "temp_period": 1, "guild_settings": None,
@@ -339,7 +339,7 @@ class GraphSendingTests(unittest.IsolatedAsyncioTestCase):
             await view_parts.send_graph_ephemeral(interaction, buffer, "fictional.png", "架空")
         self.assertTrue(buffer.closed)
         interaction.response.send_message.assert_awaited_once()
-        self.assertIn("架空の画像失敗", interaction.response.send_message.call_args.args[0])
+        self.assertNotIn("架空の画像失敗", interaction.response.send_message.call_args.args[0])
 
     async def test_cancellation_propagates_after_closing_buffer(self) -> None:
         interaction = make_interaction()

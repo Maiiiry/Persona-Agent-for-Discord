@@ -14,6 +14,24 @@ from persona_bot.core.guild_lifecycle import prepare_guild_join, remove_guild_st
 
 
 class GuildRemoveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_settings_are_inactive_before_stop_completes(self):
+        state = BotState()
+        old = state.get_guild(1)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def stop(*args, **kwargs):
+            entered.set()
+            await release.wait()
+
+        task = asyncio.create_task(remove_guild_state(
+            1, state, SimpleNamespace(stop_session=stop), SimpleNamespace(release=Mock()),
+        ))
+        await entered.wait()
+        self.assertFalse(old.is_active)
+        self.assertIs(state.guild_settings[1], old)
+        release.set()
+        await task
+
     async def test_rejoin_during_each_stop_preserves_new_state_even_on_cancellation(self):
         for stage in ("autonomous", "voice"):
             for canceled in (False, True):

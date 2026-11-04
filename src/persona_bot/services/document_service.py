@@ -240,6 +240,7 @@ class DocumentService:
             guild_settings = await self._state.get_guild_async(guild_id)
             response_settings = guild_settings.snapshot_response()
 
+            prompt = await load_persona_template(response_settings.prompt_file)
             summaries = [
                 await self._process_attachment(attachment, author_id, response_settings.model_name)
                 for attachment in attachments
@@ -256,8 +257,6 @@ class DocumentService:
                 )
                 return
 
-            prompt_file = response_settings.prompt_file
-            prompt = await load_persona_template(prompt_file)
             memory_category = await self._memory.route_category(question)
             memory_context, document_context = await self._memory.build_contexts(
                 memory_category, author_id, limit=max(DOCUMENT_MEMORY_CONTEXT_LIMIT, len(attachments)),
@@ -342,7 +341,10 @@ class DocumentService:
             if message is not None:
                 try:
                     # 返信に載せるファイル名は利用者の入力なので、返信先の本人以外へは通知させない。
-                    await message.reply(build_failure_notice(error), allowed_mentions=REPLY_ALLOWED_MENTIONS)
+                    notice = build_failure_notice(error)
+                    if self._ng_filter is not None:
+                        notice = self._ng_filter.mask_with_log(notice, label="文書タスクの失敗通知")
+                    await message.reply(notice, allowed_mentions=REPLY_ALLOWED_MENTIONS)
                 except Exception as reply_error:
                     logger.error("文書タスク失敗通知に失敗しました。", exc_info=reply_error)
             return

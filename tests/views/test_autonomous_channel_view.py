@@ -170,6 +170,7 @@ class SettingsEntryTests(unittest.IsolatedAsyncioTestCase):
         view = self.settings_view(is_admin=True)
         view.ng_count = 3
         view.blacklist_status = "架空の状態"
+        view.blacklist_provider = Mock(return_value=[object(), object()])
         view.blocked_user_check = Mock(return_value=False)
         make_hub = Mock()
         view.make_hub = make_hub
@@ -191,7 +192,7 @@ class SettingsEntryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("キャラ設定パネル", returning.edit_original_response.await_args.kwargs["content"])
         self.assertIs(parent.guild_settings, self.settings)
         self.assertEqual(parent.ng_count, 3)
-        self.assertEqual(parent.blacklist_status, "架空の状態")
+        self.assertEqual(parent.blacklist_status, "2人")
         self.assertIs(parent.make_hub, make_hub)
         self.assertIs(parent.blocked_user_check, view.blocked_user_check)
         self.assertIs(parent.message, await returning.original_response())

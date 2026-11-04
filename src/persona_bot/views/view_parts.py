@@ -315,9 +315,13 @@ class BackButton(ui.Button):
             return
 
         begin_panel_operation(view, interaction)
+        if isinstance(view, PanelView) and not await view.ensure_settings_current(interaction):
+            return
         hub = make_parent(interaction)
         if isawaitable(hub):
             hub = await hub
+        if isinstance(view, PanelView) and not await view.ensure_settings_current(interaction):
+            return
         hub.blocked_user_check = getattr(view, "blocked_user_check", None)
         if not await edit_panel_message(interaction, content=hub.build_preview(), view=hub, source=view):
             return
@@ -344,7 +348,12 @@ async def swap_panel(
         panel:       差し替え先のサブパネル。
         content:     差し替え後のメッセージ本文（通常は panel.build_preview()）。
     """
+    if isinstance(hub, PanelView) and not await hub.ensure_settings_current(interaction):
+        panel.stop()
+        return
     panel.blocked_user_check = getattr(hub, "blocked_user_check", None)
+    if not hasattr(panel, "guild_settings") and hasattr(hub, "guild_settings"):
+        panel.guild_settings = hub.guild_settings
     if not await edit_panel_message(interaction, content=content, view=panel, source=hub):
         return
     # ハブは役目を終えたので停止する。止めないとハブのタイムアウト処理が
@@ -383,7 +392,7 @@ async def send_graph_ephemeral(
         caption:     画像に添えるメッセージ本文。
         followup:    defer済みの場合はTrueにし、followupで送信する。
         error_log:   互換性のため保持する旧ログ文脈名。ログには固定の文面を使う。
-        error_notice: 送信失敗時の案内文。省略時は例外の内容を添える。
+        error_notice: 送信失敗時の案内文。省略時は固定の案内を使う。
     """
     picture = None
     try:
@@ -396,7 +405,7 @@ async def send_graph_ephemeral(
         if followup or not interaction.response.is_done():
             sender = interaction.followup.send if followup else interaction.response.send_message
             try:
-                await sender(error_notice or f"エラー: グラフの送信に失敗しました。（{error}）", ephemeral=True)
+                await sender(error_notice or "エラー: グラフの送信に失敗しました。", ephemeral=True)
             except Exception as notice_error:
                 logger.error("グラフ送信失敗の案内も送れませんでした。", exc_info=notice_error)
     finally:
