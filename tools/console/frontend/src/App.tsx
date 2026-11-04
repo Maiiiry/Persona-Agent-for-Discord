@@ -6,7 +6,8 @@ import { CompactFab, ModalNavigationRail, NavigationBar, NavigationRail, type Fa
 import { ToastProvider, ToastViewport, useToast } from "./components/toast";
 import { TopAppBar, type ThemeChoice } from "./components/TopBar";
 import { Kbd } from "./components/ui";
-import { useLogStream, useMediaQuery, useNow, usePolling, useStoredState } from "./hooks";
+import { useConsoleShortcuts } from "./useConsoleShortcuts";
+import { useLogStream, useMediaQuery, useNow, useStoredState } from "./hooks";
 import { PAGES, isPageId, type PageId } from "./navigation";
 import { ConnectionPage } from "./pages/ConnectionPage";
 import { DataPage } from "./pages/DataPage";
@@ -15,19 +16,11 @@ import { LogsPage } from "./pages/LogsPage";
 import { OperationsPage } from "./pages/OperationsPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { PrivacyContext, collectSecrets, createPrivacy } from "./privacy";
-import { useConnectionScope, useDeployController, useServiceController } from "./controllers";
+import { useConnectionScope, useConsolePolling, useDeployController, useServiceController } from "./controllers";
 import { unsetFieldsOf } from "./profiles";
 import { SEED_OPTIONS, applyTheme } from "./theme/theme";
 import { withViewTransition } from "./viewTransition";
 import type { ConnectionState, Insights, Operation, Profile, Sample, ServiceAction, StatusResponse } from "./types";
-
-const STATUS_INTERVAL_MS = 5000;
-const INSIGHTS_INTERVAL_MS = 60_000; // Discord API の利用制限に配慮して1分ごと（バックエンドも60秒キャッシュする）
-const CONNECTION_INTERVAL_MS = 10000;
-const MAX_SAMPLES = 60; // 5秒 × 60 = 直近5分ぶん
-// デプロイの記録を取り直す間隔（実行中はステップの進み具合を見せるため短く）
-
-const GO_KEY_TIMEOUT_MS = 1200; // g を押してから次のキーを待つ時間
 
 // M3 のウィンドウサイズの区分（600 未満 = compact、1200 以上 = large）
 const LARGE_QUERY = "(min-width: 1200px)";
@@ -48,22 +41,6 @@ export default function App() {
   );
 }
 
-function toSample(status: StatusResponse): Sample {
-  const memory = status.resources?.memory;
-  return {
-    t: status.fetched_at * 1000,
-    rtt: status.rtt_ms,
-    botMemory: status.service?.memory_bytes ?? null,
-    hostMemoryRatio: memory && memory.total > 0 ? memory.used / memory.total : null,
-    load1: status.resources?.load?.[0] ?? null,
-  };
-}
-
-/** 入力中（テキスト欄など）かどうか。入力中は1文字のショートカットを効かせない。 */
-function isTyping(target: EventTarget | null): boolean {
-  const element = target as HTMLElement | null;
-  return !!element && (element.tagName === "INPUT" || element.tagName === "TEXTAREA" || element.tagName === "SELECT" || element.isContentEditable);
-}
 
 function Console() {
   const notify = useToast();
@@ -104,7 +81,6 @@ function Console() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [modalRailOpen, setModalRailOpen] = useState(false);
-  const [goPending, setGoPending] = useState(false);
   const [refreshToken, setRefreshToken] = useState(0);
   const filterInputRef = useRef<HTMLInputElement>(null);
   const contentRef = useRef<HTMLElement>(null);
@@ -201,20 +177,11 @@ function Console() {
     [notify],
   );
 
-  const refreshConnection = useCallback(async () => {
-    if (connectionChanging.current) return;
-    const isCurrent = requestScope.current.start("connection");
-    try {
-      const next = await api.connection();
-      if (!isCurrent() || connectionChanging.current) return;
-      applyConnection(next);
-      setBackendError(null);
-    } catch (error) {
-      if (!isCurrent() || connectionChanging.current) return;
-      setBackendError(errorMessage(error));
-    }
-  }, [applyConnection]);
-  usePolling(refreshConnection, CONNECTION_INTERVAL_MS, true);
+  const { refreshConnection, refreshStatus, refreshInsights } = useConsolePolling({
+    requestScope, connectionChanging, wasConnected, applyConnection, connected, autoRefresh, connectionKey,
+    setBackendError, setStatus, setStatusError, setRefreshing, setSamples, setInsights,
+    setInsightsFetchedAt, setInsightsError,
+  });
 
   // 接続中は、選択欄を「実際に接続している接続先」に合わせる（別のタブや再読み込みで食い違わないように）
   const connectedProfileId = connected ? (connection?.profile?.id ?? null) : null;
@@ -237,50 +204,6 @@ function Console() {
   }, [setSelectedProfileId]);
 
   // ---- 状態の定期取得
-  const refreshStatus = useCallback(async () => {
-    if (!wasConnected.current || connectionChanging.current) return;
-    const isCurrent = requestScope.current.start("status");
-    setRefreshing(true);
-    try {
-      const next = await api.status();
-      if (!isCurrent()) return;
-      setStatus(next);
-      setStatusError(null);
-      setSamples((previous) => [...previous, toSample(next)].slice(-MAX_SAMPLES));
-    } catch (error) {
-      if (!isCurrent()) return;
-      setStatusError(errorMessage(error));
-      if (error instanceof ApiError && (error.status === 409 || error.status === 502)) void refreshConnection();
-    } finally {
-      if (isCurrent()) setRefreshing(false);
-    }
-  }, [refreshConnection]);
-  usePolling(refreshStatus, STATUS_INTERVAL_MS, connected && autoRefresh, connectionKey);
-  const refreshInsights = useCallback(async (force = false) => {
-    if (!wasConnected.current || connectionChanging.current) return;
-    const isCurrent = requestScope.current.start("insights");
-    try {
-      const result = await api.insights(force);
-      if (!isCurrent()) return;
-      setInsights(result.data);
-      setInsightsFetchedAt(result.fetched_at);
-      setInsightsError(null);
-    } catch (error) {
-      if (!isCurrent()) return;
-      setInsightsError(errorMessage(error));
-    }
-  }, []);
-  usePolling(refreshInsights, INSIGHTS_INTERVAL_MS, connected && autoRefresh, connectionKey);
-
-  useEffect(() => {
-    // 自動更新を切っていても、接続した直後に1回は取る
-    if (connected && !autoRefresh) {
-      void refreshStatus();
-      void refreshInsights();
-    }
-    // 接続が変わったときだけ動かす（自動更新の切り替えでは取り直さない）
-  }, [connectionKey]);
-
   const refreshOperations = useCallback(async () => {
     try {
       setOperations((await api.operations()).operations);
@@ -477,98 +400,11 @@ function Console() {
   );
   const togglePrivacy = useCallback(() => withViewTransition("privacy", () => setPrivacyOn((value) => !value)), [setPrivacyOn]);
 
-  // ---- キーボード操作（Vim 風）。最新の処理を ref 経由で呼ぶので、登録は1回だけ
-  const keyHandler = useRef<(event: KeyboardEvent) => void>(() => undefined);
-  const goTimer = useRef<number | undefined>(undefined);
-  const cancelGo = () => {
-    window.clearTimeout(goTimer.current);
-    setGoPending(false);
-  };
-  keyHandler.current = (event: KeyboardEvent) => {
-    if (event.ctrlKey || event.metaKey || event.altKey || event.defaultPrevented) return;
-    const target = event.target as HTMLElement | null;
-    // メニューの中のキーはメニューが扱う（↓↑ j k など）
-    if (target?.closest?.('[role="menu"]')) return;
-    const typing = isTyping(target);
-
-    if (event.key === "Escape") {
-      if (goPending) cancelGo();
-      else if (confirmOpen) setConfirmOpen(false);
-      else if (helpOpen) setHelpOpen(false);
-      else if (modalRailOpen) setModalRailOpen(false);
-      else if (typing) target?.blur();
-      return;
-    }
-    if (typing || confirmOpen) return;
-    if (helpOpen) {
-      if (event.key === "?") setHelpOpen(false);
-      return;
-    }
-
-    if (goPending) {
-      cancelGo();
-      const destination = PAGES.find((p) => p.goKey === event.key);
-      if (destination) {
-        event.preventDefault();
-        navigate(destination.id);
-        setModalRailOpen(false);
-      }
-      return;
-    }
-
-    const index = PAGES.findIndex((p) => p.id === page);
-    if (/^[1-6]$/.test(event.key)) {
-      navigate(PAGES[Number(event.key) - 1].id);
-      setModalRailOpen(false);
-      return;
-    }
-    switch (event.key) {
-      case "g":
-        setGoPending(true);
-        window.clearTimeout(goTimer.current);
-        goTimer.current = window.setTimeout(() => setGoPending(false), GO_KEY_TIMEOUT_MS);
-        break;
-      case "j":
-        navigate(PAGES[(index + 1) % PAGES.length].id);
-        break;
-      case "k":
-        navigate(PAGES[(index - 1 + PAGES.length) % PAGES.length].id);
-        break;
-      case "r":
-        manualRefresh();
-        break;
-      case "a":
-        setAutoRefresh((value) => !value);
-        break;
-      case "/":
-        event.preventDefault();
-        setModalRailOpen(false);
-        navigate("logs");
-        window.setTimeout(() => filterInputRef.current?.focus(), 60);
-        break;
-      case "p":
-        if (connected) if (page === "logs") stream.setPaused(!stream.paused);
-        break;
-      case "[":
-        toggleRail();
-        break;
-      case "h":
-        togglePrivacy();
-        break;
-      case "t":
-        toggleTheme();
-        break;
-      case "?":
-        setModalRailOpen(false);
-        setHelpOpen(true);
-        break;
-    }
-  };
-  useEffect(() => {
-    const listener = (event: KeyboardEvent) => keyHandler.current(event);
-    window.addEventListener("keydown", listener);
-    return () => window.removeEventListener("keydown", listener);
-  }, []);
+  const goPending = useConsoleShortcuts({
+    page, connected, paused: stream.paused, setPaused: stream.setPaused,
+    confirmOpen, setConfirmOpen, helpOpen, setHelpOpen, modalRailOpen, setModalRailOpen,
+    setAutoRefresh, filterInputRef, navigate, manualRefresh, toggleRail, togglePrivacy, toggleTheme,
+  });
 
   // FAB には、その時の主な操作を置く（未接続なら接続、接続中なら更新）
   const fab: FabAction = connected

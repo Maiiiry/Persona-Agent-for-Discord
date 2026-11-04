@@ -2,8 +2,9 @@ import { WavyProgress, LoadingIndicator } from "../components/expressive";
 import { Icon } from "../components/Icon";
 import { Button, Card, Chip, InlineError, Notice, Sparkline, SplitButton, Stat, StatusChip } from "../components/ui";
 import { formatBytes, formatClock, formatDuration, formatNumber, formatPercent, formatRelative } from "../format";
-import { LEVEL_LABELS, classifyEntries, displayMessage } from "../logs";
-import { conversationLines, redactLogLine, redactOperationalMessages, usePrivacy } from "../privacy";
+import { LEVEL_LABELS } from "../logs";
+import { prepareLogEntries } from "../logPresentation";
+import { usePrivacy } from "../privacy";
 import type { PageId } from "../navigation";
 import { canStopService, ratioOf, serviceTone, usageTone } from "../status";
 import type { ConnectionState, Insights, LogEntry, Profile, Sample, ServiceAction, StatusResponse } from "../types";
@@ -388,19 +389,7 @@ function GitCard({ status, now }: { status: StatusResponse | null; now: number }
 
 function RecentLogs({ logs, onNavigate }: { logs: LogEntry[]; onNavigate: (page: PageId) => void }) {
   const privacy = usePrivacy();
-  // 会話の秘匿判定は表示範囲を切る前に行う。Tracebackの分類は直前40件を使う。
-  const conversation = conversationLines(logs);
-  // 行をまたぐ運用ログの名前も、表示範囲を切る前に隠す。
-  const messages = redactOperationalMessages(logs.map(displayMessage), privacy).slice(-8);
-  const tail = logs.slice(-40);
-  const tailLevels = classifyEntries(tail);
-  const tailConversation = conversation.slice(-40);
-  const offset = tail.length - Math.min(8, tail.length);
-  const recent = tail.slice(-8).map((entry, index) => ({
-    entry,
-    level: tailLevels[offset + index],
-    text: redactLogLine(messages[index], tailConversation[offset + index], privacy),
-  }));
+  const recent = prepareLogEntries(logs, privacy).slice(-8);
   return (
     <Card
       title="最近のログ"

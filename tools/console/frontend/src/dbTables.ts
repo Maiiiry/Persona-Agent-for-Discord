@@ -16,7 +16,7 @@ export const STATUS_LABELS: Record<string, string> = {
   canceled: "取り消し",
 };
 
-const STATUS_TONES: Record<string, Tone> = {
+export const STATUS_TONES: Record<string, Tone> = {
   pending: "info",
   processing: "info",
   sending: "info",

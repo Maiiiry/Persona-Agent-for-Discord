@@ -25,10 +25,11 @@ const react = {
 const logPrivacy = compile(await source("logPrivacy.ts"));
 const privacy = compile(await source("privacy.ts"), {react, "./logPrivacy": logPrivacy});
 const logs = compile(await source("logs.ts"));
+const presentation = compile(await source("logPresentation.ts"), {"./logs": logs, "./privacy": privacy});
 const jsx = (type, props) => ({type, props});
 const ui = new Proxy({}, {get: (_, name) => name});
 const modules = {
-  react, "react/jsx-runtime": {jsx, jsxs: jsx}, "../privacy": privacy, "../logs": logs,
+  react, "react/jsx-runtime": {jsx, jsxs: jsx}, "../privacy": privacy, "../logs": logs, "../logPresentation": presentation,
   "../components/ui": ui, "../components/Icon": {Icon: "Icon"},
   "../components/expressive": ui, "../format": new Proxy({}, {get: () => () => "架空の時刻"}),
 };
@@ -59,6 +60,14 @@ function stepOutput(output, containsLogs) {
   const rendered = component.type(component.props);
   return nodes(rendered).find((node) => node.type === "pre").props.children;
 }
+
+test("表示範囲より前に始まる例外と会話も全行で判定する", () => {
+  const entries = [row("Traceback (most recent call last):"), ...Array.from({length: 60}, () => row("  架空の内部情報"))];
+  mode(true);
+  const visible = presentation.prepareLogEntries(entries, activePrivacy).slice(-8);
+  assert.ok(visible.every((item) => item.level === "error"));
+  assert.ok(visible.every((item) => !item.text.includes("架空の内部情報")));
+});
 
 test("#215 会話途中の初回抜粋を既知の秘密なしでも隠す", () => {
   const entries = [row("架空の質問途中"), row("架空の応答途中")];

@@ -159,8 +159,110 @@ class _Utterance:
     transcript_incomplete: bool = False
 
 
+@dataclass
+class _SpeakerState:
+    """音量判定、発言者と順番待ちを独立して管理する。"""
+
+    participants: dict[int, _Participant] = field(default_factory=dict)
+    reservations: deque[tuple[int, float]] = field(default_factory=deque)
+    active_user: int | None = None
+    speaking: bool = False
+
+    def receive(self, user_id: int, pcm: bytes, now: float, *, bot_speaking: Callable[[], bool]) -> tuple[str, _Participant]:
+        participant = self.participants.setdefault(user_id, _Participant())
+        voiced = frame_rms(pcm) >= LIVE_VAD_ENERGY_THRESHOLD
+        if self.speaking and self.active_user == user_id:
+            if voiced:
+                participant.last_voiced_at = now
+            return "send", participant
+        participant.preroll.append(pcm)
+        if now - participant.last_voiced_at > LIVE_VAD_START_GAP_MS / 1000:
+            participant.voiced_ms = 0.0
+        if not voiced:
+            return "wait", participant
+        participant.voiced_ms += len(pcm) / _INPUT_BYTES_PER_MS
+        participant.last_voiced_at = now
+        threshold = LIVE_BARGE_IN_MS if bot_speaking() else LIVE_VAD_START_MS
+        if participant.voiced_ms < threshold:
+            return "wait", participant
+        if self.speaking or not self.floor_available(user_id, now):
+            self.request_floor(user_id, now)
+            return "wait", participant
+        return "begin", participant
+
+    def request_floor(self, user_id: int, now: float) -> None:
+        if any(queued == user_id for queued, _ in self.reservations):
+            return
+        if len(self.reservations) < LIVE_SPEAKER_QUEUE_MAX:
+            self.reservations.append((user_id, now + LIVE_SPEAKER_REQUEST_TTL_SECONDS))
+
+    def remove_reservation(self, user_id: int) -> None:
+        self.reservations = deque(item for item in self.reservations if item[0] != user_id)
+
+    def floor_available(self, user_id: int, now: float) -> bool:
+        while self.reservations and self.reservations[0][1] < now:
+            self.reservations.popleft()
+        return not self.reservations or self.reservations[0][0] == user_id
+
+    def extend_reservations(self, now: float) -> None:
+        self.reservations = deque(
+            (user_id, now + LIVE_SPEAKER_REQUEST_TTL_SECONDS) for user_id, _ in self.reservations
+        )
+
+
+@dataclass
+class _TranscriptState:
+    """遅延した文字起こしを別の話者に帰属させない。"""
+
+    owner: _Utterance | None = None
+    blocked: _Utterance | None = None
+    next: _Utterance | None = None
+    blocked_since: float = float("-inf")
+    interrupted: _Utterance | None = None
+
+    def assign(self, utterance: _Utterance, now: float) -> None:
+        if self.blocked is not None:
+            if self.next is not None:
+                self.next.transcript_incomplete = True
+            self.next = utterance
+        elif self.owner is None or self.owner.transcript_closed:
+            self.owner = utterance
+        else:
+            self.blocked, self.next, self.owner = self.owner, utterance, None
+            self.blocked_since = now
+
+    def close(self, utterance: _Utterance | None) -> None:
+        if utterance is None:
+            return
+        utterance.transcript_closed = True
+        if utterance is self.blocked or utterance is self.next:
+            self.blocked = None
+            self.owner, self.next = self.next, None
+
+    def reset(self) -> None:
+        self.close(self.blocked)
+        self.close(self.owner)
+        self.owner = self.blocked = self.next = self.interrupted = None
+
+
+def _state_property(owner: str, name: str):
+    """既存の音声会話テストと内部呼び出し向けの参照口。"""
+    return property(lambda self: getattr(getattr(self, owner), name),
+                    lambda self, value: setattr(getattr(self, owner), name, value))
+
+
 class VoiceConversation:
     """1つのボイスチャンネルの音声会話（Persona Voice Controller）。"""
+
+    _participants = _state_property("_speaker_state", "participants")
+    _reservations = _state_property("_speaker_state", "reservations")
+    _active_user = _state_property("_speaker_state", "active_user")
+    _speaking = _state_property("_speaker_state", "speaking")
+    _transcript_owner = _state_property("_transcript_state", "owner")
+    _transcript_blocked = _state_property("_transcript_state", "blocked")
+    _transcript_next = _state_property("_transcript_state", "next")
+    _transcript_blocked_since = _state_property("_transcript_state", "blocked_since")
+    _interrupted = _state_property("_transcript_state", "interrupted")
 
     def __init__(
         self,
@@ -188,10 +290,7 @@ class VoiceConversation:
             connect=service.live_connect,
         )
         self._receiver: VoiceReceiver | None = None
-        self._participants: dict[int, _Participant] = {}
-        self._reservations: deque[tuple[int, float]] = deque()
-        self._active_user: int | None = None
-        self._speaking = False
+        self._speaker_state = _SpeakerState()
         self._current: _Utterance | None = None
         self._turn_seq = 0
         self._awaiting_interrupt_ack = False
@@ -209,14 +308,7 @@ class VoiceConversation:
         self._waiting_count = 0
         # 入力の文字起こしの帰属先。発話権（_current）とは別に持つ — 前の人の文字起こしが
         # 遅れて届いても、次に話し始めた人の発言として扱わない（違反・記憶を取り違えない）。
-        self._transcript_owner: _Utterance | None = None
-        # 前の人（_transcript_blocked）の文字起こしが閉じないうちに次の人が話し始めた間は、
-        # 届いた断片をどちらにも帰属させずに捨てる。閉じたら _transcript_next が帰属先になる。
-        self._transcript_blocked: _Utterance | None = None
-        self._transcript_next: _Utterance | None = None
-        self._transcript_blocked_since = float("-inf")
-        # 割り込まれた発言。サーバーの割り込みの通知で、その文字起こしを閉じる。
-        self._interrupted: _Utterance | None = None
+        self._transcript_state = _TranscriptState()
         self._stopped = False
         self._end_requested = False
         # Live の接続が再接続できずに終わった理由（CLOSED_QUOTA / CLOSED_FAILED）。終わっていなければ None。
@@ -403,28 +495,11 @@ class VoiceConversation:
             # 未同意・ブラックリスト登録者の声は Live へ送らずに捨てる。
             return
         now = self._now()
-        participant = self._participants.setdefault(user_id, _Participant())
-        voiced = frame_rms(pcm) >= LIVE_VAD_ENERGY_THRESHOLD
-        if self._speaking and self._active_user == user_id:
+        action, participant = self._speaker_state.receive(user_id, pcm, now, bot_speaking=self._bot_speaking)
+        if action == "send":
             self._queue_audio(pcm)
-            if voiced:
-                participant.last_voiced_at = now
-            return
-
-        participant.preroll.append(pcm)
-        if now - participant.last_voiced_at > LIVE_VAD_START_GAP_MS / 1000:
-            participant.voiced_ms = 0.0
-        if not voiced:
-            return
-        participant.voiced_ms += len(pcm) / _INPUT_BYTES_PER_MS
-        participant.last_voiced_at = now
-        threshold = LIVE_BARGE_IN_MS if self._bot_speaking() else LIVE_VAD_START_MS
-        if participant.voiced_ms < threshold:
-            return
-        if self._speaking or not self._floor_available_for(user_id, now):
-            self._request_floor(user_id, now)
-            return
-        self._begin_activity(user_id, participant, now)
+        elif action == "begin":
+            self._begin_activity(user_id, participant, now)
 
     def _bot_speaking(self) -> bool:
         """ボットが返答中か（生成中・再生中）。話し始めのしきい値を割り込み用に上げる。"""
@@ -468,39 +543,14 @@ class VoiceConversation:
 
     def _assign_transcript_owner(self, utterance: _Utterance, now: float) -> None:
         """話し始めた発言を、入力の文字起こしの帰属先にする（前の人の分が閉じていれば）。"""
-        if self._transcript_blocked is not None:
-            # 帰属を確定できない間に、さらに次の人が話し始めた。間の人の文字起こしは
-            # 誰の分とも確定できないまま捨てる。
-            if self._transcript_next is not None:
-                self._transcript_next.transcript_incomplete = True
-            self._transcript_next = utterance
-            return
-        owner = self._transcript_owner
-        if owner is None or owner.transcript_closed:
-            self._transcript_owner = utterance
-            return
-        # 前の人の文字起こしがまだ届きうる。閉じるまでの断片は、前の人の残りか次の人の
-        # 冒頭か区別できないため、どちらにも帰属させない。
-        self._transcript_blocked = owner
-        self._transcript_next = utterance
-        self._transcript_owner = None
-        self._transcript_blocked_since = now
+        self._transcript_state.assign(utterance, now)
 
     def _close_transcript(self, utterance: _Utterance | None) -> None:
-        if utterance is None:
-            return
-        utterance.transcript_closed = True
-        if utterance is self._transcript_blocked or utterance is self._transcript_next:
-            # 前の人の分が閉じた（または次の人の分まで出そろった）。以後の断片は次の人の分。
-            self._transcript_blocked = None
-            self._transcript_owner, self._transcript_next = self._transcript_next, None
+        self._transcript_state.close(utterance)
 
     def _reset_transcripts(self) -> None:
         """接続の張り替えで、届きうる文字起こしが無くなったときに帰属の状態を戻す。"""
-        self._close_transcript(self._transcript_blocked)
-        self._close_transcript(self._transcript_owner)
-        self._transcript_owner = self._transcript_blocked = self._transcript_next = None
-        self._interrupted = None
+        self._transcript_state.reset()
 
     def _end_activity(self, *, discard: bool = False) -> None:
         if not self._speaking:
@@ -518,24 +568,16 @@ class VoiceConversation:
             else:
                 utterance.input_task = spawn(self._judge_input(utterance), label="音声会話の入力判定")
         # 待っていた人に、少しの間だけ優先して話す機会を渡す。
-        self._reservations = deque(
-            (user_id, now + LIVE_SPEAKER_REQUEST_TTL_SECONDS) for user_id, _ in self._reservations
-        )
+        self._speaker_state.extend_reservations(now)
 
     def _request_floor(self, user_id: int, now: float) -> None:
-        if any(queued == user_id for queued, _ in self._reservations):
-            return
-        if len(self._reservations) >= LIVE_SPEAKER_QUEUE_MAX:
-            return
-        self._reservations.append((user_id, now + LIVE_SPEAKER_REQUEST_TTL_SECONDS))
+        self._speaker_state.request_floor(user_id, now)
 
     def _remove_reservation(self, user_id: int) -> None:
-        self._reservations = deque(item for item in self._reservations if item[0] != user_id)
+        self._speaker_state.remove_reservation(user_id)
 
     def _floor_available_for(self, user_id: int, now: float) -> bool:
-        while self._reservations and self._reservations[0][1] < now:
-            self._reservations.popleft()
-        return not self._reservations or self._reservations[0][0] == user_id
+        return self._speaker_state.floor_available(user_id, now)
 
     # ==================================================================
     # Live への送信（発話の区切りと音声の順序を保つため、1本の待ち行列で送る）

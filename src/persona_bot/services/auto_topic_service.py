@@ -180,67 +180,71 @@ class AutoTopicService:
         生成前の権限不足は False、生成後の権限不足は True として再生成を抑える。
         """
         last_activity = guild_settings.auto_topic_channels.get(channel.id)
-        if not self._topic_is_due(guild_settings, channel.id) or not self._can_send(channel):
-            return False
+        return await self._post_auto(
+            channel, guild_settings,
+            eligible=lambda: self._topic_is_due(guild_settings, channel.id, last_activity=last_activity),
+            member=None, anniversary_label=None,
+        )
 
+    async def _post_auto(
+        self, channel: Any, guild_settings: GuildSettings, *, eligible: Callable[[], bool],
+        member: discord.Member | None, anniversary_label: str | None,
+    ) -> bool:
+        """投稿前後の条件確認と生成・検査・送信を共通化する。"""
+        anniversary = member is not None
+        log_label = "記念日のお祝い" if anniversary else "自発的な会話"
+        short_label = "記念日" if anniversary else "自発的な会話"
+        if not eligible() or not self._can_send(channel) or (anniversary and not channel.permissions_for(member).view_channel):
+            return False
         response_settings = guild_settings.snapshot_response()
         try:
             persona_prompt = await load_persona_template(response_settings.prompt_file)
         except FileNotFoundError:
-            logger.warning("自発的な会話: プロンプトファイルが見つかりません。", exc_info=True)
+            logger.warning("%s: プロンプトファイルが見つかりません。", short_label, exc_info=True)
             return False
-
         history_text = await fetch_channel_history_text(
-            channel,
-            guild_settings.channel_reset_points.get(channel.id),
-            self._client.user,
-            AUTO_TOPIC_HISTORY_LIMIT,
+            channel, guild_settings.channel_reset_points.get(channel.id), self._client.user,
+            ANNIVERSARY_HISTORY_LIMIT if anniversary else AUTO_TOPIC_HISTORY_LIMIT,
             is_blocked=self._is_blocked,
         )
-        # 記憶はユーザー別に分離されており、特定ユーザーの個人記憶（profile）を
-        # 共有チャンネルへの話題提供に使うと、その人の私的な情報が他の参加者へ
-        # 漏れてしまう。プライバシー保護のため、自発的な話題提供では長期記憶を
-        # 使わず、全員が既に見ているチャンネル履歴だけを材料にする。
-        full_prompt = build_auto_topic_prompt(
-            persona_prompt,
-            "",
-            history_text,
-        )
-
-        if (not self._topic_is_due(guild_settings, channel.id, last_activity=last_activity)
-                or not self._can_send(channel)):
+        if anniversary:
+            full_prompt = build_anniversary_prompt(persona_prompt, member.display_name, anniversary_label, history_text)
+        else:
+            # 個人の長期記憶は共有チャンネルの話題提供には使わない。
+            full_prompt = build_auto_topic_prompt(persona_prompt, "", history_text)
+        if not eligible() or not self._can_send(channel) or (anniversary and not channel.permissions_for(member).view_channel):
             return False
-
-        # 話題提供に Google 検索は不要なためグラウンディングは無効で呼び出す
         response_text, usage_info, _sources = await self._gemini.generate(
-            full_prompt,
-            response_settings.model_name,
-            images=None,
-            timeout=AUTO_TOPIC_TIMEOUT_SECONDS,
+            full_prompt, response_settings.model_name, images=None,
+            timeout=ANNIVERSARY_TIMEOUT_SECONDS if anniversary else AUTO_TOPIC_TIMEOUT_SECONDS,
             grounding=False,
         )
-
         if not response_text:
-            logger.warning("自発的な会話: 話題の生成に失敗しました。次回の見回りで再試行します。")
+            if anniversary:
+                logger.error("記念日: お祝いメッセージの生成に失敗しました。")
+            else:
+                logger.warning("自発的な会話: 話題の生成に失敗しました。次回の見回りで再試行します。")
             return False
-
-        screened, done = await self._screen_auto_post(response_text, "自発的な会話")
-        if not self._topic_is_due(guild_settings, channel.id, last_activity=last_activity):
+        screened, done = await self._screen_auto_post(response_text, log_label)
+        if not eligible() or (anniversary and not channel.permissions_for(member).view_channel):
             return False
         if not self._can_send(channel):
-            # 既に生成した後なので、送信時の Forbidden と同じく再生成を抑える。
-            logger.warning("自発的な会話: 生成後に送信権限がなくなったため話題提供を見送ります。")
+            logger.warning("%s: 生成後に送信権限がなくなったため投稿を見送ります。", short_label)
             return True
         if screened is None:
             return done
-        response_text = screened
-
         channel_label = channel_display_name(channel)
-        self._usage.log_snapshot(
-            "自発的な会話", f"{channel_label} への話題提供", "自動実行", full_prompt, response_text, usage_info
-        )
-
-        await send_long_message(channel, response_text, allowed_mentions=discord.AllowedMentions.none())
+        if anniversary:
+            self._usage.log_snapshot(log_label, f"{member.display_name} さんの{anniversary_label}",
+                                     channel_label, full_prompt, screened, usage_info)
+            await send_long_message(
+                channel, f"{member.mention} {screened}",
+                allowed_mentions=discord.AllowedMentions(users=[member], everyone=False, roles=False, replied_user=False),
+            )
+        else:
+            self._usage.log_snapshot(log_label, f"{channel_label} への話題提供", "自動実行",
+                                     full_prompt, screened, usage_info)
+            await send_long_message(channel, screened, allowed_mentions=discord.AllowedMentions.none())
         return True
 
     # ==========================================================================
@@ -468,71 +472,12 @@ class AutoTopicService:
         label: str,
     ) -> bool:
         """お祝いメッセージを生成し、チャンネルへ投稿する。戻り値の意味は _post_topic と同様。"""
-        if (not guild_settings.auto_topic_enabled or guild_settings.autonomous_session is not None
-                or channel.id not in guild_settings.auto_topic_channels
-                or not self._can_send(channel) or not channel.permissions_for(member).view_channel):
-            return False
+        def eligible() -> bool:
+            return (
+                guild_settings.auto_topic_enabled and guild_settings.autonomous_session is None
+                and channel.id in guild_settings.auto_topic_channels
+            )
 
-        response_settings = guild_settings.snapshot_response()
-        try:
-            persona_prompt = await load_persona_template(response_settings.prompt_file)
-        except FileNotFoundError:
-            logger.warning("記念日: プロンプトファイルが見つかりません。", exc_info=True)
-            return False
-
-        history_text = await fetch_channel_history_text(
-            channel,
-            guild_settings.channel_reset_points.get(channel.id),
-            self._client.user,
-            ANNIVERSARY_HISTORY_LIMIT,
-            is_blocked=self._is_blocked,
+        return await self._post_auto(
+            channel, guild_settings, eligible=eligible, member=member, anniversary_label=label,
         )
-        full_prompt = build_anniversary_prompt(persona_prompt, member.display_name, label, history_text)
-
-        if (not guild_settings.auto_topic_enabled or guild_settings.autonomous_session is not None
-                or channel.id not in guild_settings.auto_topic_channels
-                or not self._can_send(channel) or not channel.permissions_for(member).view_channel):
-            return False
-
-        response_text, usage_info, _sources = await self._gemini.generate(
-            full_prompt,
-            response_settings.model_name,
-            images=None,
-            timeout=ANNIVERSARY_TIMEOUT_SECONDS,
-            grounding=False,
-        )
-
-        if not response_text:
-            logger.error("記念日: お祝いメッセージの生成に失敗しました。")
-            return False
-
-        screened, done = await self._screen_auto_post(response_text, "記念日のお祝い")
-        if (not guild_settings.auto_topic_enabled or guild_settings.autonomous_session is not None
-                or channel.id not in guild_settings.auto_topic_channels
-                or not channel.permissions_for(member).view_channel):
-            return False
-        if not self._can_send(channel):
-            # 当日中の再生成を止める。生成文は別チャンネルへ流用しない。
-            logger.warning("記念日: 生成後に送信権限がなくなったため今日のお祝いを見送ります。")
-            return True
-        if screened is None:
-            return done
-        response_text = screened
-
-        channel_label = channel_display_name(channel)
-        self._usage.log_snapshot(
-            "記念日のお祝い",
-            f"{member.display_name} さんの{label}",
-            channel_label,
-            full_prompt,
-            response_text,
-            usage_info,
-        )
-
-        await send_long_message(
-            channel, f"{member.mention} {response_text}",
-            allowed_mentions=discord.AllowedMentions(
-                users=[member], everyone=False, roles=False, replied_user=False,
-            ),
-        )
-        return True

@@ -4,8 +4,9 @@ import { Icon } from "../components/Icon";
 import { Button, ConnectedButtonGroup, IconButton, InlineError, StatusChip, type GroupOption } from "../components/ui";
 import { formatClock } from "../format";
 import type { LogStream } from "../hooks";
-import { LEVEL_LABELS, classifyEntries, displayMessage, type LogLevel } from "../logs";
-import { conversationLines, redactError, redactLogLine, redactOperationalMessages, usePrivacy } from "../privacy";
+import { LEVEL_LABELS, type LogLevel } from "../logs";
+import { prepareLogEntries } from "../logPresentation";
+import { redactError, usePrivacy } from "../privacy";
 import type { Profile } from "../types";
 import { NotConnected } from "./shared";
 
@@ -36,14 +37,7 @@ export function LogsPage({
   // 伏せ字モードでは、会話の本文と分かっている名前を隠した文で表示し、絞り込みもその文に対して行う
   // （隠した中身が絞り込みの一致で分かってしまわないように）
   const withLevels = useMemo(() => {
-    const levels = classifyEntries(stream.entries);
-    const conversation = conversationLines(stream.entries);
-    const messages = redactOperationalMessages(stream.entries.map(displayMessage), privacy);
-    return stream.entries.map((entry, index) => ({
-      entry,
-      level: levels[index],
-      text: redactLogLine(messages[index], conversation[index], privacy),
-    }));
+    return prepareLogEntries(stream.entries, privacy);
   }, [stream.entries, privacy]);
   const counts = useMemo(() => {
     const result: Record<LevelFilter, number> = { all: withLevels.length, error: 0, warn: 0, info: 0, system: 0 };

@@ -51,6 +51,7 @@ from persona_bot.config.constants import (
 )
 from persona_bot.core.background import spawn
 from persona_bot.services.autonomous_stage import enable_stage_speaker
+from persona_bot.utils.voice_permissions import missing_voice_permissions
 
 logger = logging.getLogger(__name__)
 
@@ -271,16 +272,9 @@ class VoiceGuard:
         bot_member = guild.me
         if bot_member is not None:
             # /join と同じ基準で、チャンネル単位の権限を確かめる。
-            permissions = channel.permissions_for(bot_member)
-            missing = [
-                name for name, allowed in (
-                    ("チャンネルを見る", permissions.view_channel),
-                    ("接続", permissions.connect), ("発言", permissions.speak),
-                )
-                if not allowed
-            ]
-            if isinstance(channel, discord.StageChannel) and not permissions.mute_members:
-                missing.append("メンバーをミュート")
+            missing = missing_voice_permissions(
+                channel, bot_member, stage_moderation=isinstance(channel, discord.StageChannel),
+            )
             if missing:
                 names = "・".join(f"「{name}」" for name in missing)
                 return None, f"元のチャンネルで{names}の権限が無い"

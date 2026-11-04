@@ -18,6 +18,7 @@ function compile(text, modules = {}) {
 const logPrivacy = compile(await source("logPrivacy.ts"));
 const privacy = compile(await source("privacy.ts"), {react: React, "./logPrivacy": logPrivacy});
 const logs = compile(await source("logs.ts"));
+const presentation = compile(await source("logPresentation.ts"), {"./logs": logs, "./privacy": privacy});
 const oldName = "架空の過去チャンネル", otherName = "架空の移動先";
 // 実際の識別子は使わず、架空の値を断片から作る。
 const ids = ["1", "2", "3"].map((end) => ["81", "0000", "0000", "0000", "000", end].join(""));
@@ -35,7 +36,7 @@ function hidden(text, secrets = [oldName, otherName, ...ids]) {
 const wrap = ({children}) => React.createElement("section", null, children);
 const ui = {Card: wrap, Button: wrap, InlineError: wrap, IconButton: () => null, ConnectedButtonGroup: () => null,
   StatusChip: ({label}) => React.createElement("span", null, label)};
-const modules = {react: React, "react/jsx-runtime": jsxRuntime, "../privacy": privacy, "../logs": logs,
+const modules = {react: React, "react/jsx-runtime": jsxRuntime, "../privacy": privacy, "../logs": logs, "../logPresentation": presentation,
   "../components/ui": ui, "../components/Icon": {Icon: () => null},
   "../components/expressive": {WavyProgress: () => null, LoadingIndicator: () => null},
   "../format": {formatClock: () => "架空の時刻"}};

@@ -17,12 +17,29 @@ const {
   readAnalysis,
   resolveColumns,
   STATUS_LABELS,
+  STATUS_TONES,
   statusTone,
 } = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputText).toString("base64")}`);
 
 test("文書の送信中を進行中として表示する", () => {
   assert.equal(STATUS_LABELS.sending, "送信中");
   assert.equal(statusTone("sending"), "info");
+});
+
+test("ボットが保存するキューとリマインダーの状態を表示できる", async () => {
+  const database = await readFile(new URL("../../../../src/persona_bot/core/database.py", import.meta.url), "utf8");
+  const documents = await readFile(new URL("../../../../src/persona_bot/services/document_service.py", import.meta.url), "utf8");
+  const active = /_QUEUE_ACTIVE_STATUSES\s*=\s*\(([^)]+)\)/.exec(database);
+  const terminal = /_TERMINAL_STATUSES\s*=\s*\{([^}]+)\}/.exec(documents);
+  const reminders = /DELETE FROM reminders WHERE status IN \(([^)]+)\)/.exec(database);
+  assert.ok(active && terminal && reminders, "ボット側の状態定義が見つかりません");
+  const names = [...[active[1], terminal[1], reminders[1]].flatMap((text) =>
+    [...text.matchAll(/["']([a-z]+)["']/g)].map((match) => match[1])), "pending"];
+  for (const status of new Set(names)) {
+    assert.ok(STATUS_LABELS[status], `状態 ${status} のラベルがありません`);
+    assert.ok(Object.hasOwn(STATUS_TONES, status), `状態 ${status} のトーンがありません`);
+  }
+  for (const status of active[1].matchAll(/"([a-z]+)"/g)) assert.equal(statusTone(status[1]), "info");
 });
 
 test("画面のテーブル定義は、バックエンドが中身を返すテーブル（DB_TABLES）と一致する", async () => {

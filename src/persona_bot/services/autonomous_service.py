@@ -849,46 +849,7 @@ class AutonomousService:
         だけは必ず出す — 人を誘うことがこの機能の目的なので、AI の調子で
         案内そのものが消えては困るため。
         """
-        response_settings = guild_settings.snapshot_response()
-        try:
-            body = AUTONOMOUS_OPENING_NOTICE
-            speech = ""
-            persona_prompt = await self._load_persona(response_settings)
-            if persona_prompt is not None:
-                history_text = await fetch_channel_history_text(
-                    channel, guild_settings.channel_reset_points.get(channel.id),
-                    self._client.user, AUTONOMOUS_HISTORY_LIMIT,
-                    is_blocked=self._is_blocked,
-                )
-                full_prompt = build_autonomous_opening_prompt(
-                    persona_prompt, getattr(channel, "name", ""), history_text
-                )
-                generated = await self._generate(
-                    full_prompt, response_settings, label="第一声", detail=channel_display_name(channel)
-                )
-                speech = self._screen_speech(generated, "自律行動の第一声")
-                if speech:
-                    body = f"{AUTONOMOUS_OPENING_NOTICE}\n{speech}"
-
-            if not self._is_current_session(guild_settings, session):
-                return
-            try:
-                await send_long_message(channel, body, allowed_mentions=_NO_MENTIONS)
-            except Exception as error:
-                logger.error("自律行動: 第一声の送信に失敗しました。", exc_info=error)
-                await self._stop_failed_speech(guild, guild_settings, session)
-                return
-            # テキストの送信待機中にも /join・/leave・外部からの移動が起こりうる。
-            if speech and self.can_speak_session(guild, guild_settings, session):
-                await speak_text(
-                    guild, speech, response_settings.prompt_file,
-                    is_valid=lambda: self.can_speak_session(guild, guild_settings, session),
-                )
-        finally:
-            session.busy = False
-            # 失敗したときも時刻を進める。進めないと次の見回りで即座に再挑戦し、
-            # 生成が壊れている間ずっと毎分 API を叩き続けることになる。
-            session.last_spoke_at = datetime.now(timezone.utc)
+        await self._speak_turn(guild, guild_settings, session, channel=channel, opening=True)
 
     async def _speak_monologue(
         self,
@@ -897,29 +858,38 @@ class AutonomousService:
         session: AutonomousSession,
     ) -> None:
         """独り言を1つ生成して投稿・発話する。"""
+        await self._speak_turn(guild, guild_settings, session, channel=None, opening=False)
+
+    async def _speak_turn(
+        self, guild: discord.Guild, guild_settings: GuildSettings, session: AutonomousSession,
+        *, channel: Any | None, opening: bool,
+    ) -> None:
+        """第一声と独り言の生成・送信・読み上げを同じ手順で行う。"""
         response_settings = guild_settings.snapshot_response()
+        label = "第一声" if opening else "独り言"
         try:
-            channel = self._client.get_channel(session.channel_id)
+            if not opening:
+                channel = self._client.get_channel(session.channel_id)
             if channel is None:
                 return
             persona_prompt = await self._load_persona(response_settings)
-            if persona_prompt is None:
+            if persona_prompt is None and not opening:
                 return
-
-            history_text = await fetch_channel_history_text(
-                channel, guild_settings.channel_reset_points.get(channel.id),
-                self._client.user, AUTONOMOUS_HISTORY_LIMIT,
-                is_blocked=self._is_blocked,
-            )
-            full_prompt = build_autonomous_monologue_prompt(
-                persona_prompt, history_text, session.turn_count
-            )
-            # 独り言に調べ物は要らないためグラウンディングは使わない（既定の False）。
-            generated = await self._generate(
-                full_prompt, response_settings, label="独り言", detail=channel_display_name(channel)
-            )
-            speech = self._screen_speech(generated, "自律行動の独り言")
-            if not speech:
+            speech = ""
+            if persona_prompt is not None:
+                history_text = await fetch_channel_history_text(
+                    channel, guild_settings.channel_reset_points.get(channel.id),
+                    self._client.user, AUTONOMOUS_HISTORY_LIMIT, is_blocked=self._is_blocked,
+                )
+                full_prompt = (
+                    build_autonomous_opening_prompt(persona_prompt, getattr(channel, "name", ""), history_text)
+                    if opening else build_autonomous_monologue_prompt(persona_prompt, history_text, session.turn_count)
+                )
+                generated = await self._generate(
+                    full_prompt, response_settings, label=label, detail=channel_display_name(channel),
+                )
+                speech = self._screen_speech(generated, f"自律行動の{label}")
+            if not opening and not speech:
                 return
 
             # 生成を待っている間に配信が終わっている（/leave など）ことがある。
@@ -928,18 +898,22 @@ class AutonomousService:
                 return
 
             try:
-                await send_long_message(channel, speech, allowed_mentions=_NO_MENTIONS)
+                body = f"{AUTONOMOUS_OPENING_NOTICE}\n{speech}" if opening and speech else (
+                    AUTONOMOUS_OPENING_NOTICE if opening else speech
+                )
+                await send_long_message(channel, body, allowed_mentions=_NO_MENTIONS)
             except Exception as error:
-                logger.error("自律行動: 独り言の送信に失敗しました。", exc_info=error)
+                logger.error("自律行動: %sの送信に失敗しました。", label, exc_info=error)
                 await self._stop_failed_speech(guild, guild_settings, session)
                 return
-            if not self.can_speak_session(guild, guild_settings, session):
+            if not speech or not self.can_speak_session(guild, guild_settings, session):
                 return
             await speak_text(
                 guild, speech, response_settings.prompt_file,
                 is_valid=lambda: self.can_speak_session(guild, guild_settings, session),
             )
-            session.turn_count += 1
+            if not opening:
+                session.turn_count += 1
         finally:
             session.busy = False
             session.last_spoke_at = datetime.now(timezone.utc)

@@ -405,7 +405,9 @@ class DocumentService:
             await validate_document_file(temp_path, suffix)
 
             uploaded_file = await self._gemini.upload_file(temp_path)
-            summary_data = await self._gemini.summarize_document(uploaded_file, attachment.filename, model_name)
+            summary_data = await self._gemini.summarize_document(
+                uploaded_file, attachment.filename, model_name, on_usage=self._record_summary_usage,
+            )
             summary_data["document_hash"] = await run_in_thread(self._document_hash, temp_path)
             return summary_data
         finally:
@@ -423,6 +425,15 @@ class DocumentService:
     def _document_hash(path: Path) -> str:
         """ファイル内容だけの指紋を、同期ワーカーで算出する。"""
         return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def _record_summary_usage(self, usage_info: Any) -> None:
+        """要約内容をログへ出さず、トークン数のみ記録する。"""
+        if self._usage is None or usage_info is None:
+            return
+        try:
+            self._usage.log_tokens("文書要約", usage_info)
+        except Exception as error:
+            logger.warning("文書要約のトークン記録に失敗しました: %s", type(error).__name__)
 
     async def _download_to_temp_file(self, attachment: discord.Attachment, suffix: str) -> Path:
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
