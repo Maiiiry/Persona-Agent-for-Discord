@@ -22,6 +22,7 @@ from persona_bot.services.voice_conversation import (
     VoiceConversationService,
 )
 from persona_bot.services.autonomous_stage import enable_stage_speaker
+from persona_bot.utils.voice_permissions import missing_voice_permissions
 from persona_bot.services.blacklist_service import BlacklistService
 from persona_bot.services.content_moderator import ContentModerator
 from persona_bot.utils.discord_helpers import is_administrator, is_bot_owner, reject_blocked_interaction
@@ -211,16 +212,7 @@ def register_commands(
         # 「接続に失敗しました」としか伝えられず原因にたどり着けない。
         bot_member = guild.me if guild is not None else None
         if bot_member is not None:
-            permissions = voice_channel.permissions_for(bot_member)
-            missing_permissions = [
-                name for name, allowed in (
-                    ("チャンネルを見る", permissions.view_channel),
-                    ("接続", permissions.connect), ("発言", permissions.speak),
-                )
-                if not allowed
-            ]
-            if is_stage and not permissions.mute_members:
-                missing_permissions.append("メンバーをミュート")
+            missing_permissions = missing_voice_permissions(voice_channel, bot_member, stage_moderation=is_stage)
             if missing_permissions:
                 permission_names = "・".join(f"「{name}」" for name in missing_permissions)
                 await interaction.response.send_message(

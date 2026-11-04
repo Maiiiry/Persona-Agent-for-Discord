@@ -7,7 +7,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
@@ -481,6 +481,14 @@ class GeminiDocumentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["config"].temperature, 0)
         self.assertEqual(kwargs["config"].response_mime_type, "application/json")
         self.assertEqual(kwargs["config"].http_options.timeout, int(gemini_service.DOCUMENT_SUMMARY_TIMEOUT_SECONDS * 1000))
+
+    async def test_document_summary_reports_usage_even_if_json_is_invalid(self) -> None:
+        usage = SimpleNamespace(total_token_count=17)
+        self.generate.return_value = SimpleNamespace(text="invalid", candidates=[], usage_metadata=usage)
+        callback = Mock()
+        with self.assertRaises(ValueError):
+            await self.service.summarize_document(self.uploaded, "example.pdf", "selected-model", on_usage=callback)
+        callback.assert_called_once_with(usage)
 
     async def test_invalid_or_empty_summary_raises(self) -> None:
         for text in ("JSONではない", "{}", '{"summary":" "}', '{"summary":null}',

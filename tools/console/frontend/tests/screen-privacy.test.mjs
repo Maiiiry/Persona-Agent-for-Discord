@@ -232,6 +232,7 @@ function appHarness() {
     operations: async () => ({operations: []}), status: async () => ({fetched_at: 1}),
     insights: async () => ({data: {discord: {guilds: []}}, fetched_at: 1})};
   const modules = {react: rt.hooks, "react/jsx-runtime": {jsx, jsxs: jsx}, "./privacy": actualPrivacy,
+    "./useConsoleShortcuts": {useConsoleShortcuts: () => false},
     "./hooks": {useStoredState: (_key, initial) => rt.hooks.useState(initial), useNow: () => 0,
       useMediaQuery: () => true, useLogStream: () => ({}), usePolling: noop},
     "./api": {api, errorMessage: (error) => error.message, ApiError: Error},

@@ -111,7 +111,7 @@ class DocumentShutdownTests(unittest.IsolatedAsyncioTestCase):
             order = []
             summarizing, deleting, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
-            async def summarize(*args):
+            async def summarize(*args, **kwargs):
                 summarizing.set()
                 await asyncio.Event().wait()
 

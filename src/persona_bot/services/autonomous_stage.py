@@ -14,6 +14,7 @@ import discord
 
 from persona_bot.core.app_state import AutonomousSession, GuildSettings
 from persona_bot.core.background import wait_for_cleanup
+from persona_bot.utils.voice_permissions import missing_voice_permissions, missing_voice_permissions_for
 from persona_bot.config.constants import (
     AUTONOMOUS_STAGE_TOPIC,
     AUTONOMOUS_VOICE_STATE_RETRIES,
@@ -78,13 +79,7 @@ def can_use_voice(channel: discord.VoiceChannel, bot_member: discord.Member) -> 
     独り言はチャンネル付属のチャットにも投稿し、そこがコメントの受付口にも
     なるため、接続・発話だけでなく閲覧と送信の権限も要る。
     """
-    permissions = channel.permissions_for(bot_member)
-    return bool(
-        permissions.view_channel
-        and permissions.connect
-        and permissions.speak
-        and permissions.send_messages
-    )
+    return not missing_voice_permissions(channel, bot_member, text=True)
 
 
 def can_use_stage(channel: discord.StageChannel, bot_member: discord.Member) -> bool:
@@ -97,9 +92,7 @@ def can_use_stage(channel: discord.StageChannel, bot_member: discord.Member) -> 
     条件を満たさないステージは候補から外す（入っても喋れないため）。
     """
     permissions = channel.permissions_for(bot_member)
-    if not (permissions.view_channel and permissions.connect and permissions.send_messages):
-        return False
-    if not permissions.mute_members:
+    if missing_voice_permissions_for(permissions, speak=False, text=True, stage_moderation=True):
         return False
     if channel.instance is None and not (permissions.manage_channels and permissions.move_members):
         return False

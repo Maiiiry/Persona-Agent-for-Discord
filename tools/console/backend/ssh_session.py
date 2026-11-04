@@ -18,6 +18,7 @@ from pathlib import Path
 
 import asyncssh
 
+from async_utils import CancellationState, await_shielded
 from profiles import Profile, resolve_local_path
 
 CONNECT_TIMEOUT_SECONDS = 10
@@ -338,15 +339,14 @@ class SshSession:
                     on_waiting()
                 # 終了要求は送らず、フォアグラウンドの処理が自然に終わるのを待つ。
                 # シェルだけを止めると git/pip が残り、巻き戻しと競合しうる。
-                while True:
-                    try:
-                        await asyncio.shield(task)
-                        break
-                    except asyncio.CancelledError:
-                        if task.cancelled():
-                            self.command_state_unknown = True
-                            raise
-                        canceled = True
+                state = CancellationState(canceled=canceled)
+                try:
+                    await await_shielded(task, state)
+                except asyncio.CancelledError:
+                    self.command_state_unknown = True
+                    raise
+                finally:
+                    canceled = state.canceled
                 if canceled:
                     message = f"{label}: 中断されました。遠隔コマンドの終了とチャネルの回収を確認しました。"
                     self._record(label, command, task.result().exit_status, started, ok=False, error=message)

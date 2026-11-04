@@ -22,6 +22,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 
 import remote_commands as rc
+from async_utils import CancellationState, await_shielded
 from profiles import Profile
 from ssh_session import CommandResult, CommandStateUnknownError, SshError, SshSession
 
@@ -158,20 +159,14 @@ class DeployRunner:
         except asyncio.CancelledError:
             # SSH実行の終了を待った後で巻き戻す。追加キャンセルでも復旧を先に打ち切らない。
             recovery = asyncio.create_task(self._recover_canceled())
-            while True:
-                try:
-                    await asyncio.shield(recovery)
-                    break
-                except asyncio.CancelledError:
-                    if recovery.cancelled():
-                        raise
-                except Exception as error:  # noqa: BLE001 — 復旧の失敗で元のキャンセルと終了記録を失わない
-                    detail = f"中断後の復旧で想定外のエラーが発生しました（{type(error).__name__}: {error}）。サーバーの状態を確かめてください。"
-                    if self.session.command_state_unknown or isinstance(error, CommandStateUnknownError):
-                        self._finish_unknown(detail)
-                    else:
-                        self._finish("failed", detail)
-                    break
+            try:
+                await await_shielded(recovery, CancellationState(canceled=True))
+            except Exception as error:  # noqa: BLE001 — 復旧の失敗で元のキャンセルと終了記録を失わない
+                detail = f"中断後の復旧で想定外のエラーが発生しました（{type(error).__name__}: {error}）。サーバーの状態を確かめてください。"
+                if self.session.command_state_unknown or isinstance(error, CommandStateUnknownError):
+                    self._finish_unknown(detail)
+                else:
+                    self._finish("failed", detail)
             raise
         except Exception as error:  # noqa: BLE001 — 想定外の失敗でも、画面に「動いたまま」と見せないため記録して終える
             self._finish("failed", f"想定外のエラーでデプロイを止めました（{type(error).__name__}: {error}）。サーバーの状態を確かめてください。")
@@ -680,16 +675,9 @@ class DeployManager:
     async def wait(self) -> DeployRecord | None:
         """実行中のデプロイが終わるまで待つ（テストと終了処理用）。"""
         task = self._task
-        canceled = False
+        state = CancellationState()
         if task is not None:
-            while True:
-                try:
-                    await asyncio.shield(task)
-                    break
-                except asyncio.CancelledError:
-                    if task.cancelled():
-                        raise
-                    canceled = True
-        if canceled:
+            await await_shielded(task, state)
+        if state.canceled:
             raise asyncio.CancelledError
         return self.current

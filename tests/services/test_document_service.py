@@ -77,6 +77,20 @@ class DocumentTemporaryFileTests(unittest.IsolatedAsyncioTestCase):
         self.assert_no_files()
         self.gemini.upload_file.assert_awaited_once()
 
+    async def test_summary_records_tokens_without_conversation_snapshot(self) -> None:
+        usage = SimpleNamespace(total_token_count=17)
+        self.service._usage = SimpleNamespace(log_tokens=Mock(), log_snapshot=Mock())
+
+        async def summarize(*args, on_usage):
+            on_usage(usage)
+            return {"summary": "架空の要約"}
+
+        self.gemini.summarize_document.side_effect = summarize
+        result = await self.process()
+        self.service._usage.log_tokens.assert_called_once_with("文書要約", usage)
+        self.service._usage.log_snapshot.assert_not_called()
+        self.assertNotIn("usage", result)
+
     async def test_partial_write_failure_removes_temporary_file(self) -> None:
         original = Path.write_bytes
 
@@ -180,7 +194,7 @@ class DocumentTemporaryFileTests(unittest.IsolatedAsyncioTestCase):
     async def test_repeated_cancellation_waits_for_remote_cleanup_before_local_removal(self) -> None:
         summarizing, deleting, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
-        async def summarize(*args):
+        async def summarize(*args, **kwargs):
             summarizing.set()
             await asyncio.Event().wait()
 

@@ -3,7 +3,7 @@ import asyncio
 from math import ceil
 from pathlib import Path
 from time import monotonic
-from typing import Any, NamedTuple, Sequence
+from typing import Any, Callable, NamedTuple, Sequence
 
 from google.genai import types
 
@@ -229,7 +229,10 @@ class GeminiService:
         except Exception as error:
             logger.error("Geminiファイル削除に失敗しました。", exc_info=error)
 
-    async def summarize_document(self, uploaded_file: Any, document_name: str, model_name: str) -> dict[str, Any]:
+    async def summarize_document(
+        self, uploaded_file: Any, document_name: str, model_name: str, *,
+        on_usage: Callable[[Any], None] | None = None,
+    ) -> dict[str, Any]:
         prompt = build_document_summary_prompt(document_name)
         response = await generate_content(
             self._client,
@@ -239,6 +242,8 @@ class GeminiService:
             temperature=0,
             response_mime_type="application/json",
         )
+        if on_usage is not None:
+            on_usage(getattr(response, "usage_metadata", None))
         parsed = extract_json_object(safe_response_text(response) or "", required_keys=("summary",))
         if not parsed:
             raise ValueError("要約JSONを取得できませんでした。")

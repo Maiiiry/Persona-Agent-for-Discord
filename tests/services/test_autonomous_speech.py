@@ -115,6 +115,18 @@ class AutonomousSpeechTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.settings.autonomous_session, replacement)
         self.voice.disconnect.assert_not_awaited()
 
+    async def test_opening_failure_keeps_notice_and_only_monologue_increments_turn(self):
+        self.gemini.generate.return_value = (None, None, [])
+        await self.speak("opening")
+        self.assertEqual(self.sent.await_args.args[1], autonomous_service.AUTONOMOUS_OPENING_NOTICE)
+        self.assertEqual(self.session.turn_count, 0)
+        self.spoken.assert_not_awaited()
+
+        self.gemini.generate.return_value = ("架空の応答", None, [])
+        await self.speak("monologue")
+        self.assertEqual(self.session.turn_count, 1)
+        self.spoken.assert_awaited_once()
+
     async def test_finished_replaced_moved_or_disconnected_session_is_not_spoken_after_send(self) -> None:
         for kind in ("opening", "monologue"):
             for change in ("finished", "replaced", "moved", "disconnected", "missing"):

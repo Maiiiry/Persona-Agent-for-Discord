@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 import remote_commands as rc
+from async_utils import CancellationState, await_shielded
 from deploy import DeployManager
 from local_repo import local_schema_version
 from managed_server import MANAGED_ENV, run_server
@@ -335,16 +336,9 @@ async def stream_logs(websocket: WebSocket, lines: int = 100) -> None:
                 await websocket.close()
 
         cleanup_task = asyncio.create_task(cleanup())
-        canceled = False
-        while True:
-            try:
-                await asyncio.shield(cleanup_task)
-                break
-            except asyncio.CancelledError:
-                if cleanup_task.cancelled():
-                    raise
-                canceled = True
-        if canceled:
+        state = CancellationState()
+        await await_shielded(cleanup_task, state)
+        if state.canceled:
             raise asyncio.CancelledError
 
 
@@ -366,20 +360,14 @@ async def control_service(action: str, body: ServiceTarget | None = None) -> dic
         # 送信済みの操作は呼出元がキャンセルされても完了までロックを保つ。
         # ロック待ちの間に変わった接続先とデプロイ状態は、実行直前に取り直す。
         task = asyncio.create_task(_control_service(action, body))
-        canceled = False
-        while True:
-            try:
-                operation = await asyncio.shield(task)
-                break
-            except asyncio.CancelledError:
-                if task.cancelled():
-                    raise
-                canceled = True
-            except Exception as error:
-                if canceled:
-                    raise asyncio.CancelledError from error
-                raise
-        if canceled:
+        state = CancellationState()
+        try:
+            operation = await await_shielded(task, state)
+        except Exception as error:
+            if state.canceled:
+                raise asyncio.CancelledError from error
+            raise
+        if state.canceled:
             raise asyncio.CancelledError
         return operation
 
@@ -538,6 +526,23 @@ def _invalidate_insights() -> None:
     _insights_cache.clear()
 
 
+async def _read_json_command(command: str, *, generation: int, changed: str, failed: str,
+                             malformed: str, require_connected: bool = False, validate=None, **options) -> dict:
+    """接続先の世代を確認し、遠隔スクリプトの最終行を読み取る。"""
+    result = await session.run(command, **options)
+    if generation != session.generation or (require_connected and not session.connected):
+        raise NotConnectedError(changed)
+    if result.exit_status != 0:
+        raise SshError(failed)
+    try:
+        data = json.loads(result.stdout.strip().splitlines()[-1])
+        if not isinstance(data, dict) or (validate is not None and not validate(data)):
+            raise ValueError("結果が想定の形ではありません。")
+        return data
+    except (ValueError, IndexError) as error:
+        raise SshError(malformed) from error
+
+
 @app.get("/api/insights")
 async def get_insights(refresh: bool = False) -> dict:
     """Discord API・サーバーごとの設定・直近24時間のログから集めた「ボットの中の状態」。"""
@@ -550,22 +555,16 @@ async def get_insights(refresh: bool = False) -> dict:
         if cached and not refresh and time.monotonic() - cached[0] < INSIGHTS_CACHE_SECONDS:
             return {"data": cached[2], "fetched_at": cached[1], "cached": True}
 
-        result = await session.run(
+        data = await _read_json_command(
             rc.insights_command(profile.bot_dir, profile.service, use_sudo=profile.journal_sudo),
+            generation=generation, require_connected=True,
+            changed="集計中に SSH 接続が変わりました。接続先を確認して更新してください。",
+            failed="ボットの状態を集められませんでした。サーバーの Python とログの読み取り権限を確認してください。",
+            malformed="ボットの状態の集計結果を読み取れませんでした。",
             label="ボットの中の状態（Discord API・DB・ログ）",
             input=rc.INSIGHTS_SCRIPT,
             timeout=60,
         )
-        if generation != session.generation or not session.connected:
-            raise NotConnectedError("集計中に SSH 接続が変わりました。接続先を確認して更新してください。")
-        if result.exit_status != 0:
-            raise SshError("ボットの状態を集められませんでした。サーバーの Python とログの読み取り権限を確認してください。")
-        try:
-            data = json.loads(result.stdout.strip().splitlines()[-1])
-            if not isinstance(data, dict):
-                raise ValueError("集計結果がオブジェクトではありません。")
-        except (ValueError, IndexError) as error:
-            raise SshError("ボットの状態の集計結果を読み取れませんでした。") from error
         fetched_at = time.time()
         _insights_cache.clear()
         if epoch == _insights_epoch:
@@ -577,21 +576,15 @@ async def get_insights(refresh: bool = False) -> dict:
 async def get_db_summary() -> dict:
     profile = session.require_profile()
     generation = session.generation
-    result = await session.run(
+    summary = await _read_json_command(
         rc.db_summary_command(profile.bot_dir),
+        generation=generation,
+        changed="集計中に SSH 接続が変わりました。接続先を確認して更新してください。",
+        failed="DB の集計に失敗しました。サーバーの Python と読み取り権限を確認してください。",
+        malformed="DB の集計結果を読み取れませんでした。",
         label="DB 集計（読み取り専用）",
         input=rc.DB_SUMMARY_SCRIPT,
     )
-    if generation != session.generation:
-        raise NotConnectedError("集計中に SSH 接続が変わりました。接続先を確認して更新してください。")
-    if result.exit_status != 0:
-        raise SshError("DB の集計に失敗しました。サーバーの Python と読み取り権限を確認してください。")
-    try:
-        summary = json.loads(result.stdout.strip().splitlines()[-1])
-        if not isinstance(summary, dict):
-            raise ValueError("集計結果がオブジェクトではありません。")
-    except (ValueError, IndexError) as error:
-        raise SshError("DB の集計結果を読み取れませんでした。") from error
     # 手元のリポジトリの最新の版と比べ、新しい版がまだデプロイされていないかを画面に出す
     summary["latest_schema_version"] = local_schema_version()
     return summary
@@ -604,21 +597,16 @@ async def get_db_table(table: str, offset: int = 0, limit: int = 50) -> dict:
         raise HTTPException(status_code=404, detail="このテーブルは表示できません。")
     profile = session.require_profile()
     generation = session.generation
-    result = await session.run(
+    data = await _read_json_command(
         rc.db_table_command(profile.bot_dir, table, offset, limit),
+        generation=generation,
+        changed="読み取り中に SSH 接続が変わりました。接続先を確認して開き直してください。",
+        failed="テーブルの中身を取り寄せられませんでした。サーバーの Python と読み取り権限を確認してください。",
+        malformed="テーブルの中身を読み取れませんでした。",
+        validate=lambda value: value.get("table") == table,
         label=f"DB の中身（{table}・読み取り専用）",
         input=rc.DB_TABLE_SCRIPT,
     )
-    if generation != session.generation:
-        raise NotConnectedError("読み取り中に SSH 接続が変わりました。接続先を確認して開き直してください。")
-    if result.exit_status != 0:
-        raise SshError("テーブルの中身を取り寄せられませんでした。サーバーの Python と読み取り権限を確認してください。")
-    try:
-        data = json.loads(result.stdout.strip().splitlines()[-1])
-        if not isinstance(data, dict) or data.get("table") != table:
-            raise ValueError("取り寄せた結果が想定の形ではありません。")
-    except (ValueError, IndexError) as error:
-        raise SshError("テーブルの中身を読み取れませんでした。") from error
     return data
 
 

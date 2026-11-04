@@ -80,6 +80,7 @@ function consoleHarness(api, renderTree = false) {
     "./hooks": { useStoredState: (_key, initial) => runtime.hooks.useState(initial), useNow: () => 0,
       useMediaQuery: () => true, useLogStream: () => ({}), usePolling: () => {} },
     "./api": { api, errorMessage: (error) => error.message, ApiError: Error },
+    "./useConsoleShortcuts": { useConsoleShortcuts: () => false },
     "./components/toast": { useToast: () => (notice) => notices.push(notice), ToastViewport: "ToastViewport" },
     "./privacy": privacy, "./requestScope": scopes,
     "./navigation": { PAGES: [{ id: "overview" }], isPageId: () => true },
