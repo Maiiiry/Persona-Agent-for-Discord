@@ -79,6 +79,22 @@ class MessageHandler:
         # サブエージェントの作業スレッドへ子が投稿する Webhook（チャンネルごとに使い回す。#267）
         self._agent_webhooks = AgentWebhooks()
 
+    async def _screen_response(self, text, sources, *, log_label: str, screen_sources: bool = False):
+        """応答を検査し、送信用の出典を付ける。報告は出典も一緒に検査する。"""
+        if screen_sources:
+            text = self.ng_filter.mask_with_log(text, label=log_label)
+            sources = mask_grounding_sources(sources, self.ng_filter)
+            formatted = format_grounding_sources(sources)
+            _, accepted = await screen_bot_response_with_status(
+                text + formatted, None, self.moderator, log_label=log_label,
+            )
+            return text, sources, text + formatted, accepted
+        text, accepted = await screen_bot_response_with_status(
+            text, self.ng_filter, self.moderator, log_label=log_label,
+        )
+        reply = text + format_grounding_sources(sources, self.ng_filter) if accepted and sources else text
+        return text, sources, reply, accepted
+
     async def notify_violation(self, message: discord.Message, notice: str) -> None:
         """違反を1回記録し、ブロック状況に応じた警告をユーザーに返信する。
 
@@ -424,14 +440,10 @@ class MessageHandler:
             )
             if report is not None:
                 # 親の返信とは独立して公開されるため、出典も含めて投稿前に安全を確認する。
-                report = report._replace(
-                    text=self.ng_filter.mask_with_log(report.text, label="サブエージェントの報告"),
-                    sources=mask_grounding_sources(report.sources, self.ng_filter),
+                report_text, sources, _, accepted = await self._screen_response(
+                    report.text, report.sources, log_label="サブエージェントの報告", screen_sources=True,
                 )
-                _, accepted = await screen_bot_response_with_status(
-                    report.text + format_grounding_sources(report.sources), None, self.moderator,
-                    log_label="サブエージェントの報告",
-                )
+                report = report._replace(text=report_text, sources=sources)
                 if not accepted:
                     await progress.finish("failed")
                     progress_finished = True
@@ -560,14 +572,11 @@ class MessageHandler:
                     )
                     return None
 
-                response_text, accepted = await screen_bot_response_with_status(
-                    response_text, self.ng_filter, self.moderator, log_label="Bot応答",
-                )
                 # 参考リンクは送信用テキストにのみ追記する
                 # （長期記憶には URL の列挙はノイズになるため含めない）。
-                reply_text = response_text
-                if accepted and grounding_sources:
-                    reply_text += format_grounding_sources(grounding_sources, self.ng_filter)
+                response_text, _, reply_text, accepted = await self._screen_response(
+                    response_text, grounding_sources, log_label="Bot応答",
+                )
 
                 # 送信の失敗は呼出元へ伝える。
                 sent = await send_long_reply(message, reply_text, suppress_embeds=bool(accepted and grounding_sources))

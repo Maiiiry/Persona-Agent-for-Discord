@@ -1,6 +1,5 @@
 import logging
 import asyncio
-import time
 from dataclasses import dataclass
 import io
 from inspect import isawaitable
@@ -16,6 +15,27 @@ from persona_bot.utils.discord_helpers import reject_blocked_interaction
 
 
 logger = logging.getLogger(__name__)
+
+
+async def authorize_panel_operation(view, interaction, *, allowed, recheck, notice: str) -> bool:
+    """押下時と待機後の権限を確かめ、拒否時は適切な応答を返す。"""
+    if not allowed:
+        await interaction.response.send_message(notice, ephemeral=True)
+        return False
+    begin_panel_operation(view, interaction)
+    await interaction.response.defer(ephemeral=True)
+    return await confirm_panel_permission(interaction, await recheck(interaction), notice=notice)
+
+
+async def confirm_panel_permission(interaction, allowed: bool, *, notice: str, followup: bool = False) -> bool:
+    """待機後の判定結果を返し、画面の更新先に応じて拒否を案内する。"""
+    if allowed:
+        return True
+    if followup:
+        await interaction.followup.send(notice, ephemeral=True)
+    else:
+        await edit_panel_message(interaction, deferred=True, content=notice, view=None)
+    return False
 
 # ハブ（機能パネル）を再生成する呼び出し可能オブジェクトの型。
 # functions_view を直接 import すると循環参照になるため、呼び出し側から
@@ -177,42 +197,18 @@ class PanelView(ui.View):
         self._task_owner: TaskOwner | None = task_owner if task_owner is not None else _current_owner.get()
 
     def _dispatch_item(self, item: discord.ui.Item[Any], interaction: discord.Interaction) -> Optional[asyncio.Task[None]]:
-        """UI コールバックを TaskOwner の管理下で実行する。
-
-        discord.py 標準の _dispatch_item は asyncio.create_task で直接タスクを作るため、
-        ボット終了時に所有者の回収待機へ含まれない。このオーバーライドで
-        TaskOwner.run() 経由で実行し、停止後の新規受付拒否と実行中処理の回収を適用する。
-        """
-        if self.is_finished():
+        """終了後の新規操作を拒否し、処理の開始は discord.py に任せる。"""
+        if self._task_owner is not None and self._task_owner.stopping:
             return None
+        return super()._dispatch_item(item, interaction)
+
+    async def _scheduled_task(self, item: discord.ui.Item[Any], interaction: discord.Interaction) -> None:
+        """ライブラリの処理全体を所有者の終了待機に含める。"""
+        task = super()._scheduled_task(item, interaction)
         if self._task_owner is None:
-            return super()._dispatch_item(item, interaction)
-        if self._task_owner.stopping:
-            # 終了開始後の新規操作は受け付けない
-            return None
-
-        async def _wrapped_scheduled_task() -> None:
-            # _scheduled_task のロジックをここに展開し、TaskOwner.run で包む。
-            # item._run_checks と interaction_check、コールバック、on_error まで
-            # すべて所有者のスコープ内で実行される。
-            try:
-                item._refresh_state(interaction, interaction.data)  # type: ignore
-
-                allow = await item._run_checks(interaction) and await self.interaction_check(interaction)
-                if not allow:
-                    return
-
-                if self.timeout:
-                    self._View__timeout_expiry = time.monotonic() + self.timeout
-
-                await item.callback(interaction)
-            except Exception as e:
-                return await self.on_error(interaction, e, item)
-
-        async def _run_with_owner() -> None:
-            await self._task_owner.run(_wrapped_scheduled_task())
-
-        return asyncio.create_task(_run_with_owner(), name=f'discord-ui-view-dispatch-{self.id}')
+            await task
+        else:
+            await self._task_owner.run(task)
 
     def stop(self) -> None:
         if self._panel_state.current is self:

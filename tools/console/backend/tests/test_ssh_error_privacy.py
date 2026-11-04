@@ -56,7 +56,7 @@ class SshErrorPrivacyTests(unittest.IsolatedAsyncioTestCase):
                     send_json=AsyncMock(), close=AsyncMock(),
                 )
                 session = SimpleNamespace(
-                    require_profile=profile,
+                    require_profile=profile, generation=1,
                     open_process=AsyncMock(side_effect=SshError(raw, safe_message=safe_message)),
                 )
                 with patch.object(app, "session", session):

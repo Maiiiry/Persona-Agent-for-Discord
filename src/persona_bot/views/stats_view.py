@@ -7,7 +7,7 @@ from persona_bot.utils.discord_helpers import is_administrator, is_current_admin
 from persona_bot.services.feedback_service import FeedbackService, get_default_service
 from persona_bot.services.stats_service import StatsService
 from persona_bot.views.view_parts import (
-    begin_panel_operation, edit_panel_message, panel_operation_is_current,
+    begin_panel_operation, confirm_panel_permission, edit_panel_message, panel_operation_is_current,
     BackButton, HubFactory, PanelView,
     select_option_text, send_graph_ephemeral,
 )
@@ -112,10 +112,9 @@ class RunStatsButton(ui.Button):
             allowed = target_id == view.viewer_id or await is_current_administrator(interaction)
             if not panel_operation_is_current(view, interaction):
                 return
-            if not allowed:
-                await edit_panel_message(interaction, deferred=True,
-                    content="この機能はサーバー管理者のみ利用できます。", view=None,
-                )
+            if not await confirm_panel_permission(
+                interaction, allowed, notice="この機能はサーバー管理者のみ利用できます。",
+            ):
                 return
             # 途中の生成失敗でも、それまでに作成したFileをfinallyで回収する。
             for filename, buffer in images:
@@ -183,8 +182,9 @@ class RankingButton(ui.Button):
         finally:
             if not allowed and buffer is not None:
                 buffer.close()
-        if not allowed:
-            await interaction.followup.send("この機能はサーバー管理者のみ利用できます。", ephemeral=True)
+        if not await confirm_panel_permission(
+            interaction, allowed, notice="この機能はサーバー管理者のみ利用できます。", followup=True,
+        ):
             return
         if buffer is None:
             await interaction.followup.send(
@@ -239,8 +239,10 @@ class FeedbackButton(ui.Button):
         try:
             summary = await feedback.build_summary_text(interaction.guild_id)
             # 集計の待機中に権限を失った場合も、管理者用の結果を送らない。
-            if not await is_current_administrator(interaction):
-                await interaction.followup.send("この機能はサーバー管理者のみ利用できます。", ephemeral=True)
+            if not await confirm_panel_permission(
+                interaction, await is_current_administrator(interaction),
+                notice="この機能はサーバー管理者のみ利用できます。", followup=True,
+            ):
                 return
             for chunk in split_message(summary) or ["表示できるフィードバックの集計がありません。"]:
                 await interaction.followup.send(chunk, ephemeral=True)
