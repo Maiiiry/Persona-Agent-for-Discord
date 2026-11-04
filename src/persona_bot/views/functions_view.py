@@ -53,6 +53,7 @@ class OpenSettingsButton(ui.Button):
             ng_count=hub.ng_filter.word_count,
             ng_count_provider=lambda: hub.ng_filter.word_count,
             blacklist_status=blacklist_status,
+            blacklist_provider=hub.blacklist.get_all_blocked_users,
             make_hub=hub.clone,
             # 押した時点の権限で、管理者専用の 🎙️ 配信先 を出すかを決める
             is_admin=is_administrator(interaction.user),

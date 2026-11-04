@@ -581,6 +581,31 @@ class UserStatsPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.stats_load_all()["user-0"]["analysis"], final)
         self.assertEqual(calls, 2)
 
+    async def test_older_waiter_receives_result_when_newer_analysis_is_pending(self):
+        entered = [asyncio.Event(), asyncio.Event()]
+        release = [asyncio.Event(), asyncio.Event()]
+        calls = 0
+
+        async def generate(*args, **kwargs):
+            nonlocal calls
+            index = calls
+            calls += 1
+            entered[index].set()
+            await release[index].wait()
+            return json.dumps(self.generated_analysis), None, []
+
+        self.gemini.generate.side_effect = generate
+        older = self.start_analysis()
+        await entered[0].wait()
+        await self.service.record("user-0", "架空", "新しい架空の発言", self.when)
+        newer = self.start_analysis()
+        await entered[1].wait()
+        release[0].set()
+        self.assertIsNotNone(await older)
+        self.assertIsNone(self.service.cache["user-0"].get("analysis"))
+        release[1].set()
+        self.assertIsNotNone(await newer)
+
     async def test_force_request_during_save_shares_the_finishing_analysis(self) -> None:
         entered, release = asyncio.Event(), asyncio.Event()
         original_save = self.service._save_user_locked

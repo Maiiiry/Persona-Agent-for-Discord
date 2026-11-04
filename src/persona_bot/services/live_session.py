@@ -181,17 +181,17 @@ class LiveSession:
             LiveUnavailableError: 接続できなかった（quota が真なら利用枠の超過）。
         """
         try:
-            try:
-                await self._open()
-            except Exception as error:
-                if self._drop_search_on_quota(error):
+            while True:
+                try:
                     await self._open()
-                elif is_config_error(error):
-                    # ボイス名・検索に対応していないモデルでも、会話そのものはできるようにする。
-                    logger.warning("Gemini Live: 接続の設定を受け付けられなかったため、ボイス名と検索を外して接続し直します。", exc_info=error)
-                    self._minimal = True
-                    await self._open()
-                else:
+                    break
+                except Exception as error:
+                    if self._drop_search_on_quota(error):
+                        continue
+                    if not self._minimal and is_config_error(error):
+                        logger.warning("Gemini Live: 設定を外して接続し直します。", exc_info=error)
+                        self._minimal = True
+                        continue
                     raise
         except asyncio.CancelledError:
             await self._close_current()
@@ -279,7 +279,14 @@ class LiveSession:
                 self._options, handle=handle, minimal=self._minimal, search=not self._search_off,
             )
             context = self._connect_live(model=self._model, config=config)
-            session = await asyncio.wait_for(context.__aenter__(), timeout=LIVE_CONNECT_TIMEOUT_SECONDS)
+            try:
+                session = await asyncio.wait_for(context.__aenter__(), timeout=LIVE_CONNECT_TIMEOUT_SECONDS)
+            except BaseException:
+                try:
+                    await wait_for_cleanup(context.__aexit__(None, None, None), label="Gemini Live の接続中断")
+                except Exception:
+                    logger.debug("Gemini Live: 接続中断後の回収に失敗しました。", exc_info=True)
+                raise
             if handle is not None and epoch != self._context_epoch:
                 # 接続を待つ間に文脈の破棄（同意の撤回）を求められた。撤回前のハンドルで再開した
                 # セッションは使わず、新しいセッションでつなぎ直す。

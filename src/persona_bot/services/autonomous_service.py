@@ -75,7 +75,7 @@ from persona_bot.config.constants import (
     AUTONOMOUS_TALK_INTERVAL_MINUTES,
     AUTONOMOUS_TIMEOUT_SECONDS,
 )
-from persona_bot.services.content_moderator import ContentModerator, screen_bot_response
+from persona_bot.services.content_moderator import ContentModerator, screen_bot_response_with_status
 from persona_bot.utils.discord_helpers import (
     can_bot_send_messages,
     fetch_channel_history_text,
@@ -308,9 +308,11 @@ class AutonomousService:
 
                 # 「ユーザーからのインプットに対しては今まで通りフィルターを使う」（idea.md）
                 # ため、自発発言と違いここでは AI モデレーションまで通す。
-                response_text = await screen_bot_response(
+                response_text, accepted = await screen_bot_response_with_status(
                     response_text, self._ng_filter, self._moderator, log_label="自律行動のコメント応答"
                 )
+                if not accepted:
+                    return None
 
                 # 生成を待っている間に配信が終わっている（/leave など）ことがある。
                 # 終わった配信の「配信者としての応答」を後から投稿しないよう、
@@ -701,7 +703,7 @@ class AutonomousService:
     async def stop_all_sessions(self) -> None:
         """周期処理の終了後、所有するすべての配信枠と接続を回収する。"""
         canceled = False
-        for guild_id in list(self._state.guild_settings):
+        for guild_id in set(self._state.guild_settings) | set(self._starting) | set(self._stopping):
             try:
                 await self.stop_session(guild_id, reason="ボットの終了")
             except asyncio.CancelledError:
@@ -740,9 +742,14 @@ class AutonomousService:
             return True
 
         guild_settings = self._state.guild_settings.get(guild_id)
-        if guild_settings is None:
-            return False
         starting = self._starting.get(guild_id)
+        if guild_settings is None:
+            if starting is None:
+                return False
+            starting.stopped = True
+            if starting.task is not asyncio.current_task():
+                await wait_for_cleanup(starting.finished.wait(), label="自律行動の開始中止待機")
+            return True
         if starting is not None:
             # connect()がまだ戻っていない場合にも、後着するセッションの登録を止める。
             starting.stopped = True

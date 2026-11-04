@@ -108,7 +108,11 @@ class PersonaSelect(ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: SettingsView = self.view  # type: ignore[assignment]
-        begin_panel_operation(view, interaction)
+        operation = begin_panel_operation(view, interaction)
+        if operation is not None and not operation.is_current():
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+            return
         view.temp_persona = self.values[0]
         view.refresh_items()
         await edit_panel_message(interaction, content=view.build_preview(), view=view)
@@ -134,7 +138,11 @@ class ModelSelect(ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: SettingsView = self.view  # type: ignore[assignment]
-        begin_panel_operation(view, interaction)
+        operation = begin_panel_operation(view, interaction)
+        if operation is not None and not operation.is_current():
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+            return
         view.temp_model = self.values[0]
         view.refresh_items()
         await edit_panel_message(interaction, content=view.build_preview(), view=view)
@@ -160,7 +168,11 @@ class RespondModeSelect(ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: SettingsView = self.view  # type: ignore[assignment]
-        begin_panel_operation(view, interaction)
+        operation = begin_panel_operation(view, interaction)
+        if operation is not None and not operation.is_current():
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+            return
         view.temp_respond_mode = self.values[0]
         view.refresh_items()
         await edit_panel_message(interaction, content=view.build_preview(), view=view)
@@ -227,7 +239,11 @@ class ResetButton(ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: SettingsView = self.view  # type: ignore[assignment]
-        begin_panel_operation(view, interaction)
+        operation = begin_panel_operation(view, interaction)
+        if operation is not None and not operation.is_current():
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+            return
 
         channel = interaction.channel
         channel_id = getattr(channel, "id", None)
@@ -240,12 +256,12 @@ class ResetButton(ui.Button):
 
         # パネル作成時ではなく、ボタン押下時点を境界にする。
         # Interaction ID もメッセージと同じ Snowflake なので履歴の after に使える。
-        view.guild_settings.channel_reset_points[int(channel_id)] = interaction.id
-
-        await edit_panel_message(interaction,
+        edited = await edit_panel_message(interaction,
             content="🔄 会話履歴をリセットしました。ここから新しい会話を始めます。",
             view=None,
         )
+        if edited and view.guild_settings.is_active:
+            view.guild_settings.channel_reset_points[int(channel_id)] = interaction.id
 
 
 class OpenAutonomousChannelButton(ui.Button):
@@ -274,13 +290,15 @@ class OpenAutonomousChannelButton(ui.Button):
             # 開き直すときも、全体の違反件数は最新の所有者だけに表示する。
             blacklist_status = "非公開（ボット所有者のみ）"
             if is_bot_owner(back_interaction) and await is_current_bot_owner(back_interaction):
-                blacklist_status = view.blacklist_status
+                if view.blacklist_provider is not None:
+                    blocked_users = view.blacklist_provider()
+                    blacklist_status = f"{len(blocked_users)}人" if blocked_users else "なし"
             settings = SettingsView(
                 view.guild_settings,
                 view.ng_count_provider() if view.ng_count_provider is not None else view.ng_count,
                 blacklist_status,
-                make_hub=view.make_hub, is_admin=is_administrator(back_interaction.user),
-                ng_count_provider=view.ng_count_provider,
+                make_hub=view.make_hub, is_admin=await is_current_administrator(back_interaction),
+                ng_count_provider=view.ng_count_provider, blacklist_provider=view.blacklist_provider,
             )
             settings.temp_persona = view.temp_persona
             settings.temp_model = view.temp_model
@@ -312,6 +330,7 @@ class SettingsView(PanelView):
         make_hub: HubFactory | None = None,
         is_admin: bool = False,
         ng_count_provider: Callable[[], int] | None = None,
+        blacklist_provider: Callable[[], list] | None = None,
     ) -> None:
         super().__init__(
             timeout_notice=(
@@ -323,6 +342,7 @@ class SettingsView(PanelView):
         self.ng_count = ng_count
         self.ng_count_provider = ng_count_provider
         self.blacklist_status = blacklist_status
+        self.blacklist_provider = blacklist_provider
         # 「戻る」ボタンが機能パネルを再生成するための生成関数
         self.make_hub = make_hub
         # 開いた時点で管理者か。管理者以外には 🎙️ 配信先 のボタン自体を出さない。

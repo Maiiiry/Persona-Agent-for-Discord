@@ -191,6 +191,13 @@ class AutonomousSpeechTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(is_valid())
                     self.settings.autonomous_session = self.session
 
+    async def test_unsafe_comment_response_is_not_posted(self):
+        with patch.object(autonomous_service, "screen_bot_response_with_status", new=AsyncMock(return_value=("拒否", False))):
+            result = await self.service.handle_comment(self.make_comment(), "架空のコメント", self.settings)
+        self.assertIsNone(result)
+        self.sent.assert_not_awaited()
+        self.spoken.assert_not_awaited()
+
     async def test_all_speech_paths_load_persona_without_blocking_loop(self) -> None:
         for kind in ("opening", "monologue", "comment"):
             with self.subTest(kind=kind):

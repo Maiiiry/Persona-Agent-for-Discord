@@ -270,6 +270,35 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(connect.configs[1].speech_config)
         self.assertTrue(live.connected)
 
+    async def test_search_quota_then_configuration_fallback(self):
+        quota = errors.APIError(1011, {"message": "quota exceeded"})
+        config = errors.ClientError(400, {"message": "設定未対応"})
+        live, connect = self.make([quota, config, FakeSession([])])
+        await live.start()
+        self.assertEqual(len(connect.configs), 3)
+        self.assertTrue(live._minimal)
+        self.assertTrue(live._search_off)
+
+    async def test_cancel_during_connection_closes_pending_context(self):
+        live, _ = self.make([])
+        entered, closed = asyncio.Event(), asyncio.Event()
+
+        class Context:
+            async def __aenter__(self):
+                entered.set()
+                await asyncio.Event().wait()
+
+            async def __aexit__(self, *args):
+                closed.set()
+
+        live._connect_live = lambda **kwargs: Context()
+        task = asyncio.create_task(live.start())
+        await entered.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(closed.is_set())
+
     async def test_quota_without_search_is_not_retried(self):
         options = LiveOptions(system_instruction="x", voice_name="Kore", grounding=False)
         connect = FakeConnect([errors.ClientError(429, {"message": "架空の上限"})])
