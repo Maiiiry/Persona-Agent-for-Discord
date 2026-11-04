@@ -135,6 +135,14 @@ class InsightsScriptTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def test_missing_guild_settings_table_does_not_report_read_error(self):
+        db_path = self.root / "data" / "memory" / "bot.db"
+        db_path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(db_path)):
+            pass
+        self.insights(journal=[])
+        self.assertNotIn("guild_settings を読めませんでした", self.stdout)
+
     def insights(self, env: dict | None = None, *, responses=None, journal=None, journal_code=0,
                  journal_grep_code=None, journal_stderr="private journal detail", sudo=False,
                  journal_error=None, settings_cases=None, journal_recent=None) -> dict:

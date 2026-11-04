@@ -16,7 +16,14 @@ const {
   personaName,
   readAnalysis,
   resolveColumns,
+  STATUS_LABELS,
+  statusTone,
 } = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputText).toString("base64")}`);
+
+test("文書の送信中を進行中として表示する", () => {
+  assert.equal(STATUS_LABELS.sending, "送信中");
+  assert.equal(statusTone("sending"), "info");
+});
 
 test("画面のテーブル定義は、バックエンドが中身を返すテーブル（DB_TABLES）と一致する", async () => {
   const backend = await readFile(new URL("../../backend/remote_commands.py", import.meta.url), "utf8");

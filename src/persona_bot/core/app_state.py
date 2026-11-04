@@ -12,13 +12,11 @@ from persona_bot.config.choices import (
     RESPOND_MODE_CHOICES,
 )
 from persona_bot.config.constants import (
-    DEFAULT_AUTO_TOPIC_INTERVAL_HOURS,
-    DEFAULT_MODEL_NAME,
-    DEFAULT_RESPOND_MODE,
     DM_SETTINGS_GUILD_KEY,
 )
-from persona_bot.config.personas import FOLLOW_DEFAULT_PERSONA, current_persona_catalog, persona_file_name
+from persona_bot.config.personas import current_persona_catalog, persona_file_name
 from persona_bot.core.background import run_in_thread
+from persona_bot.core.guild_settings_fields import GUILD_SETTINGS_DEFAULTS, GUILD_SETTINGS_FIELDS
 
 
 logger = logging.getLogger(__name__)
@@ -85,10 +83,10 @@ class GuildSettings:
 
     # 空文字は「既定のペルソナに従う」（まだ選んでいない）。実際に使うペルソナは
     # snapshot_response() が一覧から解決する（personas.py）。
-    current_prompt_file: str = FOLLOW_DEFAULT_PERSONA
-    current_model_name: str = DEFAULT_MODEL_NAME
-    current_respond_mode: str = DEFAULT_RESPOND_MODE
-    grounding_enabled: bool = True
+    current_prompt_file: str = GUILD_SETTINGS_DEFAULTS["prompt_file"]
+    current_model_name: str = GUILD_SETTINGS_DEFAULTS["model_name"]
+    current_respond_mode: str = GUILD_SETTINGS_DEFAULTS["respond_mode"]
+    grounding_enabled: bool = GUILD_SETTINGS_DEFAULTS["grounding_enabled"]
     # 会話リセット地点は「実行時に自然に作り直される一時状態」のため永続化しない。
     channel_reset_points: dict[int, int] = field(default_factory=dict)
 
@@ -105,8 +103,8 @@ class GuildSettings:
 
     # --- 自発的な会話 ---
     # 機能の有効/無効と無会話しきい値（時間）。/functions → 💬 自発会話 で変更する。
-    auto_topic_enabled: bool = False
-    auto_topic_interval_hours: int = DEFAULT_AUTO_TOPIC_INTERVAL_HOURS
+    auto_topic_enabled: bool = GUILD_SETTINGS_DEFAULTS["auto_topic_enabled"]
+    auto_topic_interval_hours: int = GUILD_SETTINGS_DEFAULTS["auto_topic_interval_hours"]
     # 以下2つは監視の実行時状態。会話が続けば自然に再構築されるため永続化しない。
     # 監視対象チャンネル: ボットが会話に参加したチャンネル ID → 最後に人間の発言があった時刻
     auto_topic_channels: dict[int, datetime] = field(default_factory=dict)
@@ -117,11 +115,11 @@ class GuildSettings:
     # 機能の有効/無効。自発会話（テキストへの話題提供）とは独立して切り替えられる。
     # 「話したいゲージ」が満タンになるまでの時間は auto_topic_interval_hours を共用する
     # （設定項目を増やさず /functions → 💬 自発会話 パネル1枚で完結させるため）。
-    autonomous_enabled: bool = False
+    autonomous_enabled: bool = GUILD_SETTINGS_DEFAULTS["autonomous_enabled"]
     # 管理者が指定した配信先（⚙️ キャラ設定 → 🎙️ 配信先）。None は「指定なし（自動で選ぶ）」。
     # 使えない指定（削除済み・権限不足）は autonomous_stage.pick_channel が自動選択へ戻す。
-    autonomous_stage_channel_id: int | None = None
-    autonomous_voice_channel_id: int | None = None
+    autonomous_stage_channel_id: int | None = GUILD_SETTINGS_DEFAULTS["autonomous_stage_channel_id"]
+    autonomous_voice_channel_id: int | None = GUILD_SETTINGS_DEFAULTS["autonomous_voice_channel_id"]
     # 以下3つは実行時状態。会話が続けば自然に再構築されるため永続化しない。
     # 進行中の配信（無いときは None）。
     autonomous_session: AutonomousSession | None = None
@@ -176,8 +174,8 @@ class GuildSettings:
         """
         self._apply_persisted_prompt_file(values.get("prompt_file"))
         for key, attribute, choices, default in (
-            ("model_name", "current_model_name", MODEL_CHOICES, DEFAULT_MODEL_NAME),
-            ("respond_mode", "current_respond_mode", RESPOND_MODE_CHOICES, DEFAULT_RESPOND_MODE),
+            ("model_name", "current_model_name", MODEL_CHOICES, GUILD_SETTINGS_DEFAULTS["model_name"]),
+            ("respond_mode", "current_respond_mode", RESPOND_MODE_CHOICES, GUILD_SETTINGS_DEFAULTS["respond_mode"]),
         ):
             value = values.get(key)
             if value is None or value == "":
@@ -188,22 +186,18 @@ class GuildSettings:
             else:
                 logger.warning(f'サーバー設定: 保存済みの {key} が無効なため既定値へ戻します。')
                 setattr(self, attribute, default)
-        if values.get("grounding_enabled") is not None:
-            self.grounding_enabled = bool(values["grounding_enabled"])
-        if values.get("auto_topic_enabled") is not None:
-            self.auto_topic_enabled = bool(values["auto_topic_enabled"])
-        if values.get("autonomous_enabled") is not None:
-            self.autonomous_enabled = bool(values["autonomous_enabled"])
+        for key, attribute, kind, _ in GUILD_SETTINGS_FIELDS:
+            if kind == "bool" and values.get(key) is not None:
+                setattr(self, attribute, bool(values[key]))
+            elif kind == "channel" and key in values:
+                setattr(self, attribute, _persisted_channel_id(key, values[key]))
         interval = values.get("auto_topic_interval_hours")
         if (isinstance(interval, int) and not isinstance(interval, bool)
                 and any(choice.value == interval for choice in AUTO_TOPIC_INTERVAL_CHOICES)):
             self.auto_topic_interval_hours = interval
         elif interval is not None:
             logger.warning('サーバー設定: 保存済みの auto_topic_interval_hours が無効なため既定値へ戻します。')
-            self.auto_topic_interval_hours = DEFAULT_AUTO_TOPIC_INTERVAL_HOURS
-        for key in ("autonomous_stage_channel_id", "autonomous_voice_channel_id"):
-            if key in values:
-                setattr(self, key, _persisted_channel_id(key, values[key]))
+            self.auto_topic_interval_hours = GUILD_SETTINGS_DEFAULTS["auto_topic_interval_hours"]
 
     def _apply_persisted_prompt_file(self, value: Any) -> None:
         """保存済みのペルソナを復元する。
@@ -217,7 +211,7 @@ class GuildSettings:
         file_name = persona_file_name(value)
         if file_name is None:
             logger.warning('サーバー設定: 保存済みの prompt_file が無効なため既定値へ戻します。')
-            self.current_prompt_file = FOLLOW_DEFAULT_PERSONA
+            self.current_prompt_file = GUILD_SETTINGS_DEFAULTS["prompt_file"]
             return
         self.current_prompt_file = value
         if not current_persona_catalog().contains(value):
@@ -246,15 +240,7 @@ class GuildSettings:
                 await run_in_thread(
                     self._db.guild_settings_save,
                     self.persist_key,
-                    prompt_file=self.current_prompt_file,
-                    model_name=self.current_model_name,
-                    respond_mode=self.current_respond_mode,
-                    grounding_enabled=self.grounding_enabled,
-                    auto_topic_enabled=self.auto_topic_enabled,
-                    auto_topic_interval_hours=self.auto_topic_interval_hours,
-                    autonomous_enabled=self.autonomous_enabled,
-                    autonomous_stage_channel_id=self.autonomous_stage_channel_id,
-                    autonomous_voice_channel_id=self.autonomous_voice_channel_id,
+                    **{name: getattr(self, attribute) for name, attribute, _, _ in GUILD_SETTINGS_FIELDS},
                 )
             except Exception as error:
                 logger.error(f'ギルド設定の保存に失敗しました (guild_id=<ID>): {type(error).__name__}', exc_info=error)

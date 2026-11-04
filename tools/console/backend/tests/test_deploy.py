@@ -89,6 +89,43 @@ class DeployTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await runner._step("restart", runner._restart))
         return runner, record, previous_pid
 
+    async def test_clock_failure_prevents_restart(self):
+        runner = DeployRunner(self.session, self.profile, new_record(1, self.profile), **FAST)
+        original = self.session.run
+
+        async def run(command, **kwargs):
+            if command == rc.SERVER_TIME_COMMAND:
+                return CommandResult("123", "error", 1, 1)
+            return await original(command, **kwargs)
+
+        with patch.object(self.session, "run", side_effect=run):
+            self.assertFalse(await runner._step("restart", runner._restart))
+        self.assertFalse(self.sent("systemctl restart"))
+
+    async def test_rollback_waits_for_systemd_job_before_changing_code(self):
+        runner = DeployRunner(self.session, self.profile, new_record(1, self.profile), **FAST)
+        runner._restart_attempted = True
+        calls = []
+
+        async def wait():
+            calls.append("job")
+
+        async def step(key, action):
+            calls.append(key)
+            return False
+
+        with patch.object(runner, "_wait_for_service_job", side_effect=wait), patch.object(runner, "_step", side_effect=step):
+            await runner._rollback()
+        self.assertEqual(calls[:2], ["job", "rollback_code"])
+
+    async def test_rollback_checks_job_until_it_finishes(self):
+        runner = DeployRunner(self.session, self.profile, new_record(1, self.profile), **FAST)
+        with patch.object(self.session, "run", new=AsyncMock(side_effect=[
+            CommandResult("Job=42\n", "", 0, 1), CommandResult("Job=\n", "", 0, 1),
+        ])) as run, patch("deploy.asyncio.sleep", new=AsyncMock()):
+            await runner._wait_for_service_job()
+        self.assertEqual(run.await_count, 2)
+
     async def check_health_with_raw_logs(self, runner, records):
         original_run = self.session.run
 

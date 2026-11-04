@@ -9,6 +9,7 @@ import type { DbRow, DbTablePage, DbValue } from "./types";
 export const STATUS_LABELS: Record<string, string> = {
   pending: "待機",
   processing: "処理中",
+  sending: "送信中",
   done: "完了",
   completed: "完了",
   failed: "失敗",
@@ -18,6 +19,7 @@ export const STATUS_LABELS: Record<string, string> = {
 const STATUS_TONES: Record<string, Tone> = {
   pending: "info",
   processing: "info",
+  sending: "info",
   done: "good",
   completed: "good",
   failed: "critical",

@@ -22,7 +22,7 @@ from persona_bot.views.summary_view import SummaryView
 from persona_bot.views.unblock_view import UnblockView
 from persona_bot.utils.usage_graph import UsageTracker
 from persona_bot.views.view_parts import (
-    begin_panel_operation, edit_panel_message, PanelView, send_graph_ephemeral, swap_panel,
+    authorize_panel_operation, begin_panel_operation, edit_panel_message, PanelView, send_graph_ephemeral, swap_panel,
 )
 
 
@@ -293,19 +293,10 @@ class UnblockButton(ui.Button):
     async def callback(self, interaction: discord.Interaction) -> None:
         hub: "FunctionsView" = self.view  # type: ignore[assignment]
 
-        if not is_bot_owner(interaction):
-            await interaction.response.send_message(
-                "この機能はボット所有者のみ利用できます。", ephemeral=True
-            )
-            return
-
-        begin_panel_operation(hub, interaction)
-        await interaction.response.defer(ephemeral=True)
-        if not await is_current_bot_owner(interaction):
-            await edit_panel_message(
-                interaction, deferred=True,
-                content="この機能はボット所有者のみ利用できます。", view=None,
-            )
+        if not await authorize_panel_operation(
+            hub, interaction, allowed=is_bot_owner(interaction), recheck=is_current_bot_owner,
+            notice="この機能はボット所有者のみ利用できます。",
+        ):
             return
         blocked_users = hub.blacklist.get_all_blocked_users()
         if not blocked_users:
@@ -318,7 +309,7 @@ class UnblockButton(ui.Button):
         unblock_view = UnblockView(hub.blacklist, blocked_users, make_hub=hub.clone)
         # 同じ（エフェメラルな）メッセージをブロック解除パネルに差し替える
         await swap_panel(
-            interaction, hub, unblock_view, "🚫 ブロックを解除するユーザーを選択してください。"
+            interaction, hub, unblock_view, unblock_view.build_preview()
         )
 
 

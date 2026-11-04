@@ -61,7 +61,8 @@ async def lifespan(_app: FastAPI):
         try:
             await deploys.wait()
         finally:
-            await session.disconnect()  # デプロイの終了・巻き戻しを待って接続を閉じる
+            async with _connection_change_lock:
+                await session.disconnect()  # 操作の終了を待って接続を閉じる
 
 
 app = FastAPI(title="Persona Bot Console API", lifespan=lifespan)
@@ -244,8 +245,11 @@ async def get_status() -> dict:
 @app.get("/api/logs")
 async def get_logs(lines: int = 200) -> dict:
     profile = session.require_profile()
+    generation = session.generation
     command = rc.journal_command(profile.service, lines=lines, follow=False, use_sudo=profile.journal_sudo)
     result = await session.run(command, label="ログ取得")
+    if generation != session.generation:
+        raise NotConnectedError("ログの取得中に SSH 接続が変わりました。接続先を確認して更新してください。")
     entries = [entry for line in result.stdout.splitlines() if (entry := rc.parse_journal_line(line))]
     if result.exit_status != 0 and not entries:
         raise SshError(_journal_error_message(result.stderr))
@@ -263,8 +267,14 @@ async def stream_logs(websocket: WebSocket, lines: int = 100) -> None:
 
     try:
         profile = session.require_profile()
+        generation = session.generation
         command = rc.journal_command(profile.service, lines=lines, follow=True, use_sudo=profile.journal_sudo)
         process = await session.open_process(command, label="ログ追跡（ライブ）")
+        if generation != session.generation:
+            process.close()
+            with suppress(asyncio.TimeoutError, asyncssh.Error, OSError):
+                await asyncio.wait_for(process.wait_closed(), timeout=5)
+            raise NotConnectedError("ログの取得中に SSH 接続が変わりました。接続先を確認して更新してください。")
     except SshError as error:
         with suppress(WebSocketDisconnect, RuntimeError):
             # 接続処理の生エラーには、画面が未収集の解決済みホスト名なども入りうる。
@@ -279,6 +289,8 @@ async def stream_logs(websocket: WebSocket, lines: int = 100) -> None:
         """SSH → 画面 へ流し続ける。"""
         try:
             async for line in process.stdout:
+                if generation != session.generation:
+                    return
                 entry = rc.parse_journal_line(line)
                 if entry:
                     await websocket.send_json({"type": "entry", "entry": entry})

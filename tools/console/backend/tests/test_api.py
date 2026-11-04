@@ -86,6 +86,32 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         status, _ = await request("/api/service/reboot", method="POST")
         self.assertEqual(status, 400)
 
+    async def test_logs_discard_result_after_connection_change(self):
+        async def changing_connection(*args, **kwargs):
+            self.session.generation += 1
+            return CommandResult('{"MESSAGE":"old"}', "", 0, 1)
+
+        with mock.patch.object(self.session, "run", side_effect=changing_connection):
+            with self.assertRaises(NotConnectedError):
+                await app.get_logs()
+
+    async def test_shutdown_waits_for_service_lock(self):
+        lock = asyncio.Lock()
+        await lock.acquire()
+        with mock.patch.object(app, "_connection_change_lock", lock), mock.patch.object(
+            app.deploys, "wait", new_callable=mock.AsyncMock
+        ), mock.patch.object(self.session, "disconnect", new_callable=mock.AsyncMock) as disconnect:
+            async def shutdown():
+                async with app.lifespan(app.app):
+                    pass
+
+            task = asyncio.create_task(shutdown())
+            await asyncio.sleep(0)
+            disconnect.assert_not_awaited()
+            lock.release()
+            await task
+            disconnect.assert_awaited_once()
+
     async def test_service_timeout_waits_for_fake_ssh_exit_and_checks_systemd_job(self):
         """本物のSSHチャネルでも応答期限後は操作を打ち切らず、Job確認まで待つ。"""
         target = {"profile_id": self.profile.id, "connected_at": self.session.connected_at}

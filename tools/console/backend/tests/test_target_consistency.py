@@ -98,12 +98,47 @@ class TargetConsistencyTests(unittest.IsolatedAsyncioTestCase):
                 receiving_done.set()
         websocket = SimpleNamespace(headers={"origin": "http://127.0.0.1:5173"}, accept=AsyncMock(),
             send_json=AsyncMock(side_effect=app.WebSocketDisconnect()), receive=receive, close=AsyncMock())
-        session = SimpleNamespace(require_profile=lambda: selected, open_process=AsyncMock(return_value=process))
+        session = SimpleNamespace(require_profile=lambda: selected, generation=1, open_process=AsyncMock(return_value=process))
         with patch.object(app, "session", session):
             await app.stream_logs(websocket)
         self.assertTrue(receiving_done.is_set())
         process.close.assert_called_once()
         process.wait_closed.assert_awaited_once()
+
+    async def test_log_stream_discards_process_started_for_old_generation(self):
+        process = SimpleNamespace(close=Mock(), wait_closed=AsyncMock())
+        session = SimpleNamespace(require_profile=profile, generation=1)
+
+        async def open_process(*args, **kwargs):
+            session.generation += 1
+            return process
+
+        session.open_process = open_process
+        websocket = SimpleNamespace(headers={"origin": "http://127.0.0.1:5173"}, accept=AsyncMock(),
+                                    send_json=AsyncMock(), close=AsyncMock())
+        with patch.object(app, "session", session):
+            await app.stream_logs(websocket)
+        process.close.assert_called_once()
+        process.wait_closed.assert_awaited_once()
+        self.assertEqual(websocket.send_json.await_args.args[0]["type"], "error")
+
+    async def test_log_stream_discards_lines_after_generation_change(self):
+        session = SimpleNamespace(require_profile=profile, generation=1)
+
+        async def lines():
+            session.generation += 1
+            yield '{"MESSAGE":"old"}'
+
+        process = SimpleNamespace(stdout=lines(), stderr=SimpleNamespace(read=AsyncMock(return_value="")),
+                                  close=Mock(), wait_closed=AsyncMock())
+        session.open_process = AsyncMock(return_value=process)
+        websocket = SimpleNamespace(headers={"origin": "http://127.0.0.1:5173"}, accept=AsyncMock(),
+                                    send_json=AsyncMock(), receive=AsyncMock(side_effect=lambda: asyncio.Future()),
+                                    close=AsyncMock())
+        with patch.object(app, "session", session):
+            await app.stream_logs(websocket)
+        websocket.send_json.assert_not_awaited()
+        process.close.assert_called_once()
 
     async def test_repeated_websocket_handler_cancellation_waits_for_transfer_cleanup(self):
         receiving = asyncio.Event()
@@ -122,7 +157,7 @@ class TargetConsistencyTests(unittest.IsolatedAsyncioTestCase):
         async def receive():
             await asyncio.Future()
         websocket.receive = receive
-        session = SimpleNamespace(require_profile=profile, open_process=AsyncMock(return_value=process))
+        session = SimpleNamespace(require_profile=profile, generation=1, open_process=AsyncMock(return_value=process))
         with patch.object(app, "session", session):
             task = asyncio.create_task(app.stream_logs(websocket))
             try:

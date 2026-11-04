@@ -25,7 +25,7 @@ from persona_bot.utils.discord_helpers import (
 )
 from persona_bot.views.autonomous_channel_view import AutonomousChannelView
 from persona_bot.views.view_parts import (
-    begin_panel_operation, edit_panel_message, BackButton,
+    authorize_panel_operation, begin_panel_operation, edit_panel_message, BackButton,
     HubFactory, PanelView, select_option_text, swap_panel,
 )
 
@@ -263,19 +263,10 @@ class OpenAutonomousChannelButton(ui.Button):
 
         # ボタンは管理者にしか出さないが、押した時点の権限でも確かめる（DM には配信先が無い）。
         guild = interaction.guild
-        if guild is None or not is_administrator(interaction.user):
-            await interaction.response.send_message(
-                "この機能はサーバー管理者のみ利用できます。", ephemeral=True
-            )
-            return
-
-        begin_panel_operation(view, interaction)
-        await interaction.response.defer(ephemeral=True)
-        if not await is_current_administrator(interaction):
-            await edit_panel_message(
-                interaction, deferred=True,
-                content="この機能はサーバー管理者のみ利用できます。", view=None,
-            )
+        if not await authorize_panel_operation(
+            view, interaction, allowed=guild is not None and is_administrator(interaction.user),
+            recheck=is_current_administrator, notice="この機能はサーバー管理者のみ利用できます。",
+        ):
             return
         async def make_settings(back_interaction: discord.Interaction) -> SettingsView:
             await back_interaction.response.defer(ephemeral=True)

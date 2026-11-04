@@ -268,7 +268,10 @@ def load_guild_settings():
         con = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=3)
         con.row_factory = sqlite3.Row
         try:
+            SETTINGS_COLUMNS.clear()
             SETTINGS_COLUMNS.update(row[1] for row in con.execute("PRAGMA table_info(guild_settings)"))
+            if not SETTINGS_COLUMNS:
+                return rows
             for row in con.execute("SELECT * FROM guild_settings"):
                 try:
                     rows[int(row["guild_id"])] = dict(row)

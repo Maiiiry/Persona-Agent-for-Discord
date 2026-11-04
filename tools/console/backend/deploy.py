@@ -410,19 +410,21 @@ class DeployRunner:
         self._check(step, "pip check で依存関係の食い違いなし", result.exit_status == 0, _last_line(result.stdout) or _last_line(result.stderr))
 
     async def _restart(self, step: Step) -> None:
-        self._restart_attempted = True
         await self._restart_and_verify(step)
 
     async def _restart_and_verify(self, step: Step) -> None:
         before = await self._service(step, quiet=False)
         old_pid = before["main_pid"]
         clock = await self._run(step, rc.SERVER_TIME_COMMAND, label="サーバーの時刻", quiet=True)
+        if clock.exit_status != 0:
+            raise StepFailed("サーバーの時刻を取得できませんでした。")
         try:
             # 時計の秒の切り替わりで取りこぼさないよう、1秒前から読む
             step_since = int(clock.stdout.strip()) - 1
         except ValueError as error:
             raise StepFailed(f"サーバーの時刻を読めませんでした: {clock.stdout.strip()!r}") from error
 
+        self._restart_attempted = True
         result = await self._run(
             step, rc.service_control_command(self.profile.service, "restart"), label="再起動", timeout=RESTART_TIMEOUT
         )
@@ -542,7 +544,33 @@ class DeployRunner:
 
     # ------------------------------------------------------------ 巻き戻し
 
+    async def _wait_for_service_job(self) -> None:
+        """再起動に伴う systemd の処理が終わる前にコードを戻さない。"""
+        self.session.require_command_completion()
+        deadline = time.monotonic() + RESTART_TIMEOUT
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise SshError("systemd ジョブの終了確認が期限を超えました。")
+                result = await self.session.run(
+                    rc.service_job_command(self.profile.service),
+                    label="サービス操作の終了確認", timeout=remaining,
+                )
+                if result.exit_status != 0:
+                    raise SshError("systemd ジョブの状態を取得できませんでした。")
+                if rc.parse_service_job(result.stdout) == 0:
+                    return
+                await asyncio.sleep(min(0.5, max(0, deadline - time.monotonic())))
+        except (Exception, asyncio.CancelledError) as error:
+            self.session.command_state_unknown = True
+            raise CommandStateUnknownError(
+                "systemd ジョブの終了を確認できないため、巻き戻しを停止しました。サーバーの状態を確認してください。"
+            ) from error
+
     async def _rollback(self) -> None:
+        if self._restart_attempted:
+            await self._wait_for_service_job()
         for key, title, description in ROLLBACK_STEPS:
             if not any(step.key == key for step in self.record.steps):
                 self.record.steps.append(Step(key, title, description, phase="rollback"))

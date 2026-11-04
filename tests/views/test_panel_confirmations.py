@@ -188,6 +188,7 @@ class UnblockPanelTests(unittest.IsolatedAsyncioTestCase):
         view, _ = self.make_view(users)
         select = child(view, UnblockSelect)
         self.assertEqual(len(select.options), DISCORD_SELECT_MAX_OPTIONS)
+        self.assertIn("先頭 25 件", view.build_preview())
         self.assertEqual(select.options[0].value, "1000")
         self.assertEqual(select.options[0].description, "違反 3 回")
         # 戻るボタンも持つ

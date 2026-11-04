@@ -40,10 +40,9 @@ _CREATE_TABLE_STATEMENTS は初版（バージョン1）の形のまま変更し
 両方を書き換えると二重適用でエラーになる）。
 """
 
-import logging
-
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 import threading
@@ -58,6 +57,7 @@ from persona_bot.config.constants import (
     STATS_HOURLY_BUCKETS,
     STATS_OPT_OUT_DEFAULT,
 )
+from persona_bot.core.guild_settings_fields import GUILD_SETTINGS_FIELDS
 from persona_bot.utils.storage import write_json_file
 
 
@@ -720,16 +720,8 @@ class Database:
     def _guild_settings_values(row: sqlite3.Row) -> dict[str, Any]:
         """全件復元と再参加時の復元で、保存列の変換を揃える。"""
         return {
-            "prompt_file": row["prompt_file"],
-            "model_name": row["model_name"],
-            "respond_mode": row["respond_mode"],
-            "grounding_enabled": bool(row["grounding_enabled"]),
-            "auto_topic_enabled": bool(row["auto_topic_enabled"]),
-            "auto_topic_interval_hours": row["auto_topic_interval_hours"],
-            "autonomous_enabled": bool(row["autonomous_enabled"]),
-            # 0 は「指定なし」。値の検証は GuildSettings.apply_persisted が行う。
-            "autonomous_stage_channel_id": row["autonomous_stage_channel_id"],
-            "autonomous_voice_channel_id": row["autonomous_voice_channel_id"],
+            name: bool(row[name]) if kind == "bool" else row[name]
+            for name, _, kind, _ in GUILD_SETTINGS_FIELDS
         }
 
     def guild_state_load(self, guild_id: int) -> tuple[dict[str, Any], dict[str, str]]:
@@ -751,50 +743,32 @@ class Database:
         posted = {f"{post['user_id']}:{post['label']}": post["posted_date"] for post in posts}
         return values, posted
 
-    def guild_settings_save(
-        self,
-        guild_id: int,
-        *,
-        prompt_file: str,
-        model_name: str,
-        respond_mode: str,
-        grounding_enabled: bool,
-        auto_topic_enabled: bool,
-        auto_topic_interval_hours: int,
-        autonomous_enabled: bool,
-        autonomous_stage_channel_id: int | None,
-        autonomous_voice_channel_id: int | None,
-    ) -> None:
-        """1サーバー分の設定を丸ごと保存する（既存行があれば置き換える）。
-
-        設定は数個の値しかないため、差分更新はせず常に全列を書き込む（呼び出し側が
-        どの項目を変えたかを気にしなくて済む）。DM は guild_id=0 で保存する。
-
-        **INSERT OR REPLACE は行の総入れ替え。** 列を足したときに INSERT 側へ
-        書き漏らすと、設定を保存するたびにその項目だけ既定値へ黙って戻る。
-        列を追加するときは guild_settings_load_all / GuildSettings.apply_persisted /
-        GuildSettings.persist の4か所を必ず揃えて直すこと。
-        """
+    def guild_settings_save(self, guild_id: int, **values: Any) -> None:
+        """共通定義とスキーマが一致するときだけ設定を丸ごと保存する。"""
+        names = [name for name, _, _, _ in GUILD_SETTINGS_FIELDS]
+        if set(values) != set(names):
+            raise ValueError("guild_settings の保存値が定義と一致しません。")
+        converted = []
+        for name, _, kind, _ in GUILD_SETTINGS_FIELDS:
+            value = values[name]
+            if kind == "text":
+                value = str(value)
+            elif kind == "bool":
+                value = int(bool(value))
+            elif kind == "channel":
+                value = int(value or 0)
+            else:
+                value = int(value)
+            converted.append(value)
+        columns = ", ".join(["guild_id", *names])
+        placeholders = ", ".join("?" for _ in range(len(names) + 1))
         with self._lock, self._conn:
+            columns_in_db = {row[1] for row in self._conn.execute("PRAGMA table_info(guild_settings)")}
+            if columns_in_db != {"guild_id", *names}:
+                raise ValueError("guild_settings の保存列と DB の列が一致しません。")
             self._conn.execute(
-                "INSERT OR REPLACE INTO guild_settings"
-                " (guild_id, prompt_file, model_name, respond_mode, grounding_enabled,"
-                "  auto_topic_enabled, auto_topic_interval_hours, autonomous_enabled,"
-                "  autonomous_stage_channel_id, autonomous_voice_channel_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    int(guild_id),
-                    str(prompt_file),
-                    str(model_name),
-                    str(respond_mode),
-                    int(bool(grounding_enabled)),
-                    int(bool(auto_topic_enabled)),
-                    int(auto_topic_interval_hours),
-                    int(bool(autonomous_enabled)),
-                    # 指定なし（None）は 0 で保存する
-                    int(autonomous_stage_channel_id or 0),
-                    int(autonomous_voice_channel_id or 0),
-                ),
+                f"INSERT OR REPLACE INTO guild_settings ({columns}) VALUES ({placeholders})",
+                (int(guild_id), *converted),
             )
 
     # ---- anniversary_posts（記念日のお祝い投稿記録） --------------------------

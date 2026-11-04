@@ -18,6 +18,7 @@ from persona_bot.core.app_state import BotState
 from tests.helpers.persona_helpers import install_persona_catalog
 from persona_bot.core import database
 from persona_bot.core.database import Database, SCHEMA_VERSION
+from persona_bot.core.guild_settings_fields import GUILD_SETTINGS_FIELDS
 
 
 class DatabaseInitializationTests(unittest.TestCase):
@@ -41,6 +42,16 @@ class DatabaseInitializationTests(unittest.TestCase):
         }.issubset(tables))
         self.assertEqual(self.db.guild_settings_load_all(), {})
         self.assertEqual(self.db.reminder_list_pending("test-user"), [])
+
+    def test_unknown_settings_column_prevents_replacement(self) -> None:
+        self.db.initialize()
+        values = {name: getattr(BotState().get_guild(1), attribute) for name, attribute, _, _ in GUILD_SETTINGS_FIELDS}
+        self.db.guild_settings_save(1, **values)
+        with self.db._conn:
+            self.db._conn.execute("ALTER TABLE guild_settings ADD COLUMN future_setting INTEGER DEFAULT 42")
+        with self.assertRaises(ValueError):
+            self.db.guild_settings_save(1, **values)
+        self.assertEqual(self.db._conn.execute("SELECT future_setting FROM guild_settings WHERE guild_id = 1").fetchone()[0], 42)
 
     def test_repeated_initialization_preserves_user_data(self) -> None:
         self.db.initialize()

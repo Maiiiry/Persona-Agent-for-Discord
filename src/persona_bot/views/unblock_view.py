@@ -13,7 +13,7 @@ from persona_bot.config.constants import DISCORD_SELECT_MAX_OPTIONS
 from persona_bot.services.blacklist_service import BlacklistService
 from persona_bot.utils.discord_helpers import is_bot_owner, is_current_bot_owner
 from persona_bot.views.view_parts import (
-    BackButton, HubFactory, PanelView, begin_panel_operation, edit_panel_message, select_option_text,
+    BackButton, HubFactory, PanelView, authorize_panel_operation, edit_panel_message, select_option_text,
 )
 
 
@@ -38,21 +38,14 @@ class UnblockSelect(ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: "UnblockView" = self.view  # type: ignore[assignment]
-        if not is_bot_owner(interaction):
-            await interaction.response.send_message("この機能はボット所有者のみ利用できます。", ephemeral=True)
+        if not await authorize_panel_operation(
+            view, interaction, allowed=is_bot_owner(interaction), recheck=is_current_bot_owner,
+            notice="この機能はボット所有者のみ利用できます。",
+        ):
             return
-        begin_panel_operation(view, interaction)
         user_id = int(self.values[0])
         # 選択肢のラベルから表示名を拾う（通知メッセージ用）
         name = next((o.label for o in self.options if o.value == self.values[0]), str(user_id))
-        await interaction.response.defer(ephemeral=True)
-        # 待機中に所有者が変わっても、ログイン時の情報だけで解除しない。
-        if not await is_current_bot_owner(interaction):
-            await edit_panel_message(
-                interaction, deferred=True,
-                content="この機能はボット所有者のみ利用できます。", view=None,
-            )
-            return
         if await view.blacklist.unblock(user_id):
             await edit_panel_message(interaction, deferred=True, content=f"✅ {name} のブロックを解除しました。", view=None)
         else:
@@ -89,3 +82,10 @@ class UnblockView(PanelView):
         """UI パーツを View に追加する。"""
         self.add_item(UnblockSelect(self.blocked_users))
         self.add_item(BackButton(row=1))
+
+    def build_preview(self) -> str:
+        """選択できる件数の制限を所有者へ知らせる。"""
+        text = "🚫 ブロックを解除するユーザーを選択してください。"
+        if len(self.blocked_users) > DISCORD_SELECT_MAX_OPTIONS:
+            text += f"\n先頭 {DISCORD_SELECT_MAX_OPTIONS} 件を表示しています。"
+        return text
