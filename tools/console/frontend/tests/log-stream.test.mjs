@@ -312,3 +312,26 @@ test("#215 手動再接続と接続先切替では新しい取得境界を不明
     assertPrivate(stream);
   }
 });
+
+
+test("接続切替と再接続で一時停止を解除し初期ログを表示する", (t) => {
+  const h = harness(t);
+  h.read().setPaused(true);
+  h.read().retry();
+  assert.equal(h.read().paused, false);
+  h.sockets.at(-1).message({type: "entry", entry});
+  assert.equal(h.flush().entries.length, 1);
+  h.read().setPaused(true);
+  assert.equal(h.switchConnection().paused, false);
+  h.sockets.at(-1).message({type: "entry", entry});
+  assert.equal(h.flush().entries.length, 1);
+});
+
+test("切断後に再開しても保留ログをすぐ表示する", (t) => {
+  const h = harness(t);
+  h.read().setPaused(true);
+  h.sockets[0].message({type: "entry", entry});
+  h.disable();
+  h.read().setPaused(false);
+  assert.equal(h.read().entries.length, 1);
+});

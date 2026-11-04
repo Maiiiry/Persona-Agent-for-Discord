@@ -406,8 +406,7 @@ class BotState:
             guild_settings.attach(db, guild_id)
 
         try:
-            saved_settings = db.guild_settings_load_all()
-            saved_posts = db.anniversary_posts_load_all()
+            saved_settings, saved_posts = db.guild_state_load_all()
         except Exception as error:
             logger.error(f'保存済みのギルド設定の読み込みに失敗しました: {type(error).__name__}', exc_info=error)
             return

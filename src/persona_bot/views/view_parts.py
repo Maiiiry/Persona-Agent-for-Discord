@@ -11,7 +11,7 @@ from discord import ui
 from persona_bot.config.constants import DISCORD_SELECT_LABEL_MAX_LENGTH, VIEW_TIMEOUT_SECONDS
 from persona_bot.core.background import TaskOwner, _current_owner
 from persona_bot.core.app_state import GuildSettings
-from persona_bot.utils.discord_helpers import reject_blocked_interaction
+from persona_bot.utils.discord_helpers import reject_blocked_interaction, split_message
 
 
 logger = logging.getLogger(__name__)
@@ -216,6 +216,17 @@ class PanelView(ui.View):
             self._panel_state.generation += 1
         super().stop()
 
+    async def update_preview(self, interaction: discord.Interaction, update: Callable[[], None]) -> None:
+        """最新の操作だけが一時状態とプレビューを更新する。"""
+        operation = begin_panel_operation(self, interaction)
+        if operation is not None and not operation.is_current():
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+            return
+        update()
+        self.refresh_items()
+        await edit_panel_message(interaction, content=self.build_preview(), view=self)
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """パネルを開いた後にブロックされた利用者も、操作のたびに拒否する。"""
         if self.is_finished() or self._panel_state.current is not self:
@@ -361,6 +372,33 @@ async def swap_panel(
     # 表示中のサブパネルが「機能パネルは時間切れです」に化けてしまう）。
     hub.stop()
     await bind_panel_message(interaction, panel, previous_message=getattr(hub, "message", None))
+
+
+async def send_panel_result(interaction: discord.Interaction, text: str, shown: list[bool], *, fallback: str = "") -> bool:
+    """先頭をパネルに表示し、残りは本人向けに送る。"""
+    chunks = split_message(text) or [fallback]
+    if not await edit_panel_message(interaction, deferred=True, content=chunks[0]):
+        return False
+    shown[0] = True
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk, ephemeral=True)
+    return True
+
+
+async def report_panel_failure(interaction: discord.Interaction, notice: str, *, keep_result: bool, label: str) -> None:
+    """表示済みの結果を保持しつつ、失敗を本人に伝える。"""
+    if not panel_operation_is_current(None, interaction):
+        return
+    if not keep_result:
+        try:
+            await edit_panel_message(interaction, deferred=True, content=notice, view=None)
+            return
+        except Exception as error:
+            logger.warning("%s: 失敗の案内をパネルに表示できませんでした。", label, exc_info=error)
+    try:
+        await interaction.followup.send(notice, ephemeral=True)
+    except Exception as error:
+        logger.error("%s: 失敗の案内を送れませんでした。", label, exc_info=error)
 
 
 async def send_graph_ephemeral(

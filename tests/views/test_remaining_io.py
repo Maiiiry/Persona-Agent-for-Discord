@@ -15,6 +15,7 @@ import discord
 
 from persona_bot.config import personas
 from persona_bot.core.app_state import GuildSettings
+from persona_bot.services import summary_service
 from persona_bot.views import functions_view, settings_view, summary_view
 from tests.helpers.thread_probe import make_thread_probe
 from tests.helpers.persona_helpers import install_persona_catalog
@@ -90,9 +91,9 @@ class ViewIOTests(unittest.IsolatedAsyncioTestCase):
                 operation, threads = make_thread_probe("架空のペルソナ")
                 loader = Mock(side_effect=FileNotFoundError() if missing else operation)
                 gemini = SimpleNamespace(generate=AsyncMock(return_value=("架空の要約", None, [])))
-                with patch.object(summary_view, "fetch_messages_since", new=AsyncMock(return_value=[message])), patch(
+                with patch.object(summary_service, "fetch_messages_since", new=AsyncMock(return_value=[message])), patch(
                     "persona_bot.config.paths.load_prompt_template", loader,
-                ), patch.object(summary_view, "screen_bot_response", new=AsyncMock(side_effect=lambda text, *a, **k: text)):
+                ), patch.object(summary_service, "screen_bot_response", new=AsyncMock(side_effect=lambda text, *a, **k: text)):
                     ok, text = await summary_view.generate_channel_summary(
                         object(), None, summary_view._DEFAULT_PERIOD,
                         guild_settings=GuildSettings(current_prompt_file="../prompts/prompt_default.txt"),

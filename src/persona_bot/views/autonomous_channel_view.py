@@ -98,14 +98,7 @@ class StageChannelSelect(ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: AutonomousChannelView = self.view  # type: ignore[assignment]
-        operation = begin_panel_operation(view, interaction)
-        if operation is not None and not operation.is_current():
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
-            return
-        view.temp_stage_channel_id = _selected_id(self.values)
-        view.refresh_items()
-        await edit_panel_message(interaction, content=view.build_preview(), view=view)
+        await view.update_preview(interaction, lambda: setattr(view, "temp_stage_channel_id", _selected_id(self.values)))
 
 
 class VoiceChannelSelect(ui.Select):
@@ -120,14 +113,7 @@ class VoiceChannelSelect(ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: AutonomousChannelView = self.view  # type: ignore[assignment]
-        operation = begin_panel_operation(view, interaction)
-        if operation is not None and not operation.is_current():
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
-            return
-        view.temp_voice_channel_id = _selected_id(self.values)
-        view.refresh_items()
-        await edit_panel_message(interaction, content=view.build_preview(), view=view)
+        await view.update_preview(interaction, lambda: setattr(view, "temp_voice_channel_id", _selected_id(self.values)))
 
 
 class AutonomousChannelConfirmButton(ui.Button):

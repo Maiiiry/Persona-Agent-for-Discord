@@ -123,14 +123,7 @@ class AutoTopicIntervalSelect(ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: "AutoTopicView" = self.view  # type: ignore[assignment]
-        operation = begin_panel_operation(view, interaction)
-        if operation is not None and not operation.is_current():
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
-            return
-        view.temp_interval_hours = int(self.values[0])
-        view.refresh_items()
-        await edit_panel_message(interaction, content=view.build_preview(), view=view)
+        await view.update_preview(interaction, lambda: setattr(view, "temp_interval_hours", int(self.values[0])))
 
 
 class AutoTopicToggleButton(ui.Button):
@@ -143,14 +136,7 @@ class AutoTopicToggleButton(ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: "AutoTopicView" = self.view  # type: ignore[assignment]
-        operation = begin_panel_operation(view, interaction)
-        if operation is not None and not operation.is_current():
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
-            return
-        view.temp_auto_topic_enabled = not view.temp_auto_topic_enabled
-        view.refresh_items()
-        await edit_panel_message(interaction, content=view.build_preview(), view=view)
+        await view.update_preview(interaction, lambda: setattr(view, "temp_auto_topic_enabled", not view.temp_auto_topic_enabled))
 
 
 class AutonomousToggleButton(ui.Button):
@@ -163,14 +149,7 @@ class AutonomousToggleButton(ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: "AutoTopicView" = self.view  # type: ignore[assignment]
-        operation = begin_panel_operation(view, interaction)
-        if operation is not None and not operation.is_current():
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
-            return
-        view.temp_autonomous_enabled = not view.temp_autonomous_enabled
-        view.refresh_items()
-        await edit_panel_message(interaction, content=view.build_preview(), view=view)
+        await view.update_preview(interaction, lambda: setattr(view, "temp_autonomous_enabled", not view.temp_autonomous_enabled))
 
 
 class AutoTopicConfirmButton(ui.Button):

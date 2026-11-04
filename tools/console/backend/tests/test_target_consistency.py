@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import app
 from deploy import DeployManager, DeployRunner, StepFailed, new_record
-from ssh_session import CommandResult
+from ssh_session import CommandResult, NotConnectedError
 from test_api import request
 from test_connection_lifecycle import profile
 
@@ -75,6 +75,19 @@ class TargetConsistencyTests(unittest.IsolatedAsyncioTestCase):
                 await app._connect(app.ConnectRequest(profile_id=selected.id))
             parse.assert_not_called()
             self.assertEqual(session.server_info, {"hostname": "新接続の値"} if changed else None)
+
+    async def test_read_apis_reject_disconnect_without_generation_change(self):
+        selected = profile()
+        for read in (app.get_status, app.get_db_summary, lambda: app.get_db_table("reminders")):
+            with self.subTest(read=read):
+                session = SimpleNamespace(require_profile=lambda: selected, generation=1, connected=True)
+                async def run(*args, **kwargs):
+                    session.connected = False
+                    return CommandResult('{"table":"reminders"}', "", 0, 1)
+                session.run = run
+                with patch.object(app, "session", session):
+                    with self.assertRaises(NotConnectedError):
+                        await read()
 
     async def test_head_rejects_nonzero_exit_even_with_valid_looking_stdout(self):
         selected = profile()
