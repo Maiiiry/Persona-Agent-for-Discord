@@ -21,6 +21,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 
+from service_jobs import last_line as _last_line, wait_for_service_job
 import remote_commands as rc
 from async_utils import CancellationState, await_shielded
 from profiles import Profile
@@ -110,11 +111,6 @@ class StepFailed(Exception):
 
 def _short(commit: str | None) -> str:
     return commit[:7] if commit else "—"
-
-
-def _last_line(text: str) -> str:
-    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
-    return lines[-1] if lines else ""
 
 
 class DeployRunner:
@@ -567,28 +563,11 @@ class DeployRunner:
     async def _wait_for_service_job(self) -> None:
         """再起動に伴う systemd の処理が終わる前にコードを戻さない。"""
         self.session.require_command_completion()
-        deadline = time.monotonic() + RESTART_TIMEOUT
-        try:
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise SshError("systemd ジョブの終了確認が期限を超えました。")
-                result = await self.session.run(
-                    rc.service_job_command(self.profile.service),
-                    label="サービス操作の終了確認", timeout=remaining,
-                )
-                if result.exit_status != 0:
-                    raise SshError("systemd ジョブの状態を取得できませんでした。")
-                if rc.parse_service_job(result.stdout) == 0:
-                    return
-                await asyncio.sleep(min(0.5, max(0, deadline - time.monotonic())))
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            self.session.command_state_unknown = True
-            raise CommandStateUnknownError(
-                "systemd ジョブの終了を確認できないため、巻き戻しを停止しました。サーバーの状態を確認してください。"
-            ) from error
+        await wait_for_service_job(
+            self.session, self.profile.service, timeout=RESTART_TIMEOUT, poll=0.5,
+            unknown_on_cancel=False,
+            unknown_message="systemd ジョブの終了を確認できないため、巻き戻しを停止しました。サーバーの状態を確認してください。",
+        )
 
     async def _rollback(self) -> None:
         self._rollback_started = True

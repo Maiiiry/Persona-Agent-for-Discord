@@ -242,6 +242,7 @@ function appHarness() {
     "./components/Icon": {Icon: "svg"}};
   const resolve = (name) => modules[name] ?? {};
   modules["./controllers"] = compile(sources.get("controllers.ts"), resolve);
+  modules["./confirmations"] = compile(sources.get("confirmations.tsx"), resolve);
   const controls = "requestAction, requestDeploy, confirm, confirmOpen, applyConnection, setPrivacyOn, privacy, setProfiles, notify";
   const instrumented = sources.get("App.tsx").replace("function Console() {", "export function Console() {")
     .replace("  return (\n    <PrivacyContext.Provider", `  return {${controls}};\n  return (\n    <PrivacyContext.Provider`);

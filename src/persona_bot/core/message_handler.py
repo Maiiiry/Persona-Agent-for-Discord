@@ -12,14 +12,14 @@ from persona_bot.services.affinity_service import extract_affinity_changes
 from persona_bot.core.app_state import BotState, GuildSettings, ResponseSettings
 from persona_bot.core.background import run_in_thread, spawn
 from persona_bot.core.chat_admission import ChatAdmission
+from persona_bot.core.agent_request import handle_agent_request
 from persona_bot.config.constants import (
-    AGENT_ROUTER_HISTORY_LIMIT, BLACKLIST_MAX_VIOLATIONS, GEMINI_RESPONSE_TIMEOUT_SECONDS,
+    AGENT_ROUTER_HISTORY_LIMIT, GEMINI_RESPONSE_TIMEOUT_SECONDS,
     DOCUMENT_QUEUE_FULL_NOTICE, HISTORY_LIMIT, IMAGE_ONLY_QUESTION, MAX_DOCUMENT_SIZE_BYTES,
 )
-from persona_bot.config.personas import current_persona_catalog
 from persona_bot.services.agent_plan import AgentPlan, requests_subagent
-from persona_bot.services.agent_service import render_agent_line
 from persona_bot.services.content_moderator import screen_bot_response_with_status
+from persona_bot.services.violation_notice import record_violation_notice
 from persona_bot.utils.discord_helpers import (
     attachment_is_image, clean_message_content, describe_supported_attachments,
     fetch_channel_history_text, format_grounding_sources, mask_grounding_sources, is_supported_document_attachment,
@@ -28,7 +28,7 @@ from persona_bot.utils.discord_helpers import (
 )
 from persona_bot.config.paths import load_persona_template
 from persona_bot.services.prompting import (
-    build_agent_declined_section, build_agent_report_section, build_full_prompt, build_memory_sections,
+    build_agent_declined_section, build_full_prompt, build_memory_sections,
 )
 from persona_bot.audio.voice import play_tts_response
 from persona_bot.views.agent_thread import AgentWebhooks, start_agent_progress
@@ -101,33 +101,12 @@ class MessageHandler:
         記録の成否はログにも残す。「NGワード検出」のログは記録より前に出るため、
         それだけでは違反が数えられたのか分からない（#173）。
         """
-        user_id = message.author.id
-        try:
-            count, just_blocked = await self.blacklist.record_violation(user_id, str(message.author))
-        except Exception as error:
-            # ★ 保存できなかった違反は回数に数えない。BlacklistService は保存に成功してから
-            # メモリ上の記録を差し替えるため、ここで失敗した違反はどこにも残っていない。
-            # 「あと N 回」は事実と食い違うので出さず、発言を処理しないことだけを伝える。
-            # 再試行もしない（同じ障害で失敗し続ける保存を、発言のたびに積み増さないため）。
-            logger.error(f'違反記録: 保存に失敗したため、今回の違反は回数に数えていません (user_id=<ID>): {type(error).__name__}', exc_info=error)
-            await self._send_violation_notice(message, f"⚠️ {notice}")
-            return
-        if just_blocked:
-            logger.info(f'違反記録: {count}回目の違反でブラックリストに登録しました (user_id=<ID>)')
-            await self._send_violation_notice(
-                message,
-                f"🚫 違反が{BLACKLIST_MAX_VIOLATIONS}回に達したため、ブラックリストに登録されました。"
-                "以降のメッセージは無視されます。"
-            )
-        elif count >= BLACKLIST_MAX_VIOLATIONS:
-            # 並行して届いた別の違反で既にブロック済み（record_violation は回数を増やさず
-            # just_blocked=False を返す）。そちらが 🚫 の案内を返しているため、「あと0回」の
-            # ような食い違った警告も二重の案内も出さない（ブロック中の発言は黙って破棄する）。
-            logger.warning(f'違反記録: 既にブロック済みのため警告を省略します (user_id=<ID>)')
-        else:
-            logger.info(f'違反記録: {count}/{BLACKLIST_MAX_VIOLATIONS} 回目を記録しました (user_id=<ID>)')
-            remaining = BLACKLIST_MAX_VIOLATIONS - count
-            await self._send_violation_notice(message, f"⚠️ {notice}（あと{remaining}回で応答を停止します）")
+        text, _ = await record_violation_notice(
+            self.blacklist, message.author.id, str(message.author), notice,
+            blocked_text="以降のメッセージは無視されます。", log=logger,
+        )
+        if text is not None:
+            await self._send_violation_notice(message, text)
 
     @staticmethod
     async def _send_violation_notice(message: discord.Message, text: str) -> None:
@@ -390,80 +369,13 @@ class MessageHandler:
                 close_image_attachments(image_objects)
 
     async def _handle_agent_request(
-        self,
-        message: discord.Message,
-        question: str,
-        memory_category: str,
-        plan: AgentPlan,
-        response_settings: ResponseSettings,
-        *,
-        image_objects: list | None = None,
+        self, message: discord.Message, question: str, memory_category: str, plan: AgentPlan,
+        response_settings: ResponseSettings, *, image_objects: list | None = None,
     ) -> str | None:
-        """子（サブエージェント）に作業させ、報告を人格役がペルソナの口調で言い直して返信する（#170）。
-
-        進捗は定型文（案A）で伝える。使える場面では依頼メッセージに作業スレッドを作り、親が
-        委託内容を伝えて子が Webhook で進捗と報告を残す（#267）。使えなければ1通のメッセージを
-        書き換える。子の失敗・期限切れ・中止は定型文で伝えて終える（人格役の生成はしない）。
-        返信の後処理（親密度・モデレーション・評価・記憶）は通常の会話と同じ handle_chat_message に任せる。
-        image_objects は読込済み画像の借用として人格役へ渡し、この経路では閉じない。
-        """
-        user_id = str(message.author.id)
-        catalog = current_persona_catalog()
-        lines = catalog.agent_lines(response_settings.prompt_file)
-        if not self.agent.try_acquire(user_id):
-            logger.info(f'サブエージェント: 実行中の依頼があるため受け付けませんでした (user_id=<ID>)。')
-            try:
-                await message.reply(render_agent_line(lines, "busy"), allowed_mentions=discord.AllowedMentions.none())
-            except discord.DiscordException as error:
-                logger.error(f'サブエージェント: 受付できない旨を送れませんでした: {type(error).__name__}', exc_info=error)
-            return None
-        progress = None
-        progress_finished = False
-        try:
-            # ロール・依頼内容・出力形式・手順名は進捗や作業スレッドへそのまま出るため、NG ワードを伏せておく。
-            plan = AgentPlan(
-                delegate=True,
-                role=self.ng_filter.mask_with_log(plan.role, label="サブエージェントのロール"),
-                task=self.ng_filter.mask_with_log(plan.task, label="サブエージェントの依頼内容"),
-                expected_output=self.ng_filter.mask_with_log(
-                    plan.expected_output, label="サブエージェントの出力形式",
-                ),
-                steps=tuple(self.ng_filter.mask_with_log(step, label="サブエージェントの手順") for step in plan.steps),
-            )
-            logger.info('サブエージェント: 委任します（手順: %d）。', len(plan.steps))
-            progress = await start_agent_progress(
-                message, lines, plan, webhooks=self._agent_webhooks,
-                avatar_url=catalog.agent_avatar_url(response_settings.prompt_file),
-            )
-            outcome, report = await progress.run(
-                self.agent.run(plan, response_settings.model_name, progress.update)
-            )
-            if report is not None:
-                # 親の返信とは独立して公開されるため、出典も含めて投稿前に安全を確認する。
-                report_text, sources, _, accepted = await self._screen_response(
-                    report.text, report.sources, log_label="サブエージェントの報告", screen_sources=True,
-                )
-                report = report._replace(text=report_text, sources=sources)
-                if not accepted:
-                    await progress.finish("failed")
-                    progress_finished = True
-                    return None
-            await progress.finish(outcome, report if progress.shows_report else None)
-            progress_finished = True
-            if report is None:
-                return None
-            return await self.handle_chat_message(
-                message, question, memory_category, response_settings=response_settings,
-                delegation_section=build_agent_report_section(plan.role, report.text),
-                delegated_sources=report.sources,
-                image_objects=image_objects,
-            )
-        finally:
-            try:
-                if progress is not None and not progress_finished:
-                    await progress.close()
-            finally:
-                self.agent.release(user_id)
+        return await handle_agent_request(
+            self, message, question, memory_category, plan, response_settings,
+            image_objects=image_objects, start_progress=start_agent_progress,
+        )
 
     async def handle_chat_message(
         self,

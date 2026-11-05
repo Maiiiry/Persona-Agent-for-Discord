@@ -22,11 +22,11 @@ from persona_bot.config.constants import (
     AGENT_STEP_NOTE_MAX_CHARS,
     AGENT_STEP_TIMEOUT_SECONDS,
     AGENT_TIMEZONE,
-    MAX_GROUNDING_SOURCES,
 )
 from persona_bot.services.affinity_service import strip_affinity_tag
 from persona_bot.services.agent_plan import AgentPlan
 from persona_bot.services.prompting import build_agent_worker_prompt
+from persona_bot.utils.grounding import normalize_sources
 from persona_bot.utils.timeutil import format_weekday, resolve_timezone, timezone_label
 
 logger = logging.getLogger(__name__)
@@ -97,7 +97,6 @@ class AgentService:
         notes: list[str] = []
         report = ""
         sources: list[dict[str, str]] = []
-        seen_uris: set[str] = set()
         now_text = self._now_text()
         for index, step in enumerate(plan.steps):
             if on_step is not None:
@@ -117,10 +116,6 @@ class AgentService:
             logger.info("サブエージェント: 手順%d/%dを終えました。", index + 1, len(plan.steps))
             report = text
             notes.append(text[:AGENT_STEP_NOTE_MAX_CHARS])
-            for source in result.sources:
-                uri = source.get("uri", "")
-                if uri and uri not in seen_uris and len(sources) < MAX_GROUNDING_SOURCES:
-                    seen_uris.add(uri)
-                    sources.append(source)
+            sources = normalize_sources([*sources, *result.sources])
         # 最後の手順は、メモと合わせた最終報告を書いている（build_agent_worker_prompt）。
         return AgentReport(report, sources) if report else None

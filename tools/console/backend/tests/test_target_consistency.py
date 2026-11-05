@@ -1,5 +1,6 @@
 """接続先照合・状態更新とWebSocket終了を外部接続なしで確認する。"""
 import asyncio
+import ast
 import importlib.util
 from pathlib import Path
 import sqlite3
@@ -189,6 +190,48 @@ class TargetConsistencyTests(unittest.IsolatedAsyncioTestCase):
         process.close.assert_called_once()
         process.wait_closed.assert_awaited_once()
         websocket.close.assert_awaited_once()
+
+
+class InsightsChoicesConsistencyTests(unittest.TestCase):
+    def test_current_bot_choices_and_defaults_are_read_without_import(self):
+        root = Path(__file__).resolve().parents[4]
+        config = root / "src/persona_bot/config"
+        constants_tree = ast.parse((config / "constants.py").read_text(encoding="utf-8-sig"))
+        choices_tree = ast.parse((config / "choices.py").read_text(encoding="utf-8-sig"))
+        insights_tree = ast.parse((root / "tools/console/backend/remote_scripts/insights.py").read_text(encoding="utf-8-sig"))
+        functions = [node for node in insights_tree.body if isinstance(node, ast.FunctionDef)
+                     and node.name in {"read_constants", "choice_names", "describe_settings"}]
+        self.assertEqual({node.name for node in functions}, {"read_constants", "choice_names", "describe_settings"})
+        scope = {"ast": ast, "parse_file": lambda path: constants_tree}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), "<insights関数>", "exec"), scope)
+        constants = scope["read_constants"](config / "constants.py")
+        scope.update(CONSTANTS=constants, CHOICES_TREE=choices_tree)
+        defaults = {"MODEL_CHOICES": "DEFAULT_MODEL_NAME", "RESPOND_MODE_CHOICES": "DEFAULT_RESPOND_MODE",
+                    "AUTO_TOPIC_INTERVAL_CHOICES": "DEFAULT_AUTO_TOPIC_INTERVAL_HOURS"}
+        for choice_name, default_name in defaults.items():
+            assignment = next(node for node in choices_tree.body if isinstance(node, ast.Assign)
+                              and any(isinstance(target, ast.Name) and target.id == choice_name for target in node.targets))
+            expected = {}
+            for call in assignment.value.elts:
+                args = {item.arg: item.value for item in call.keywords}
+                name = ast.literal_eval(args["name"])
+                value_node = args["value"]
+                value = constants[value_node.id] if isinstance(value_node, ast.Name) else ast.literal_eval(value_node)
+                expected[value] = name
+            with self.subTest(choice=choice_name):
+                self.assertTrue(expected)
+                self.assertEqual(scope["choice_names"](choice_name), expected)
+                self.assertIn(constants[default_name], expected)
+        scope.update(MODELS=scope["choice_names"]("MODEL_CHOICES"),
+                     MODES=scope["choice_names"]("RESPOND_MODE_CHOICES"),
+                     AUTO_TOPIC_INTERVALS=scope["choice_names"]("AUTO_TOPIC_INTERVAL_CHOICES"),
+                     SETTINGS_COLUMNS=set(), describe_persona=lambda row: {})
+        effective = scope["describe_settings"]({})
+        self.assertEqual(effective["model"], scope["MODELS"][constants["DEFAULT_MODEL_NAME"]])
+        self.assertEqual(effective["respond_mode"], scope["MODES"][constants["DEFAULT_RESPOND_MODE"]])
+        self.assertEqual(effective["auto_topic_interval_hours"], constants["DEFAULT_AUTO_TOPIC_INTERVAL_HOURS"])
+        for interval in scope["AUTO_TOPIC_INTERVALS"]:
+            self.assertEqual(scope["describe_settings"]({"auto_topic_interval_hours": interval})["auto_topic_interval_hours"], interval)
 
 
 class SummaryIndexTests(unittest.TestCase):

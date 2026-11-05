@@ -16,11 +16,12 @@ from persona_bot.config.constants import (
     GROUNDING_SUBMODEL_RETRY_ENABLED,
     MAX_GROUNDING_SOURCES,
 )
-from persona_bot.services.genai_client import generate_content
+from persona_bot.utils.grounding import normalize_sources
+from persona_bot.services.genai_client import generate_content, generate_json_content
 from persona_bot.services.prompting import build_document_summary_prompt
 from persona_bot.utils.storage import (
     contains_internal_response_text,
-    extract_json_object,
+    read_json_response,
     safe_response_text,
 )
 
@@ -180,19 +181,10 @@ class GeminiService:
         metadata = getattr(candidates[0], "grounding_metadata", None)
         chunks = getattr(metadata, "grounding_chunks", None) or []
         sources = []
-        seen_uris: set[str] = set()
         for chunk in chunks:
             web = getattr(chunk, "web", None)
-            raw_uri = getattr(web, "uri", None)
-            uri = raw_uri.strip() if isinstance(raw_uri, str) else ""
-            if not uri or uri in seen_uris:
-                continue
-            title = getattr(web, "title", None)
-            sources.append({"title": title.strip() if isinstance(title, str) else "", "uri": uri})
-            seen_uris.add(uri)
-            if len(sources) >= MAX_GROUNDING_SOURCES:
-                break
-        return sources
+            sources.append({"title": getattr(web, "title", None), "uri": getattr(web, "uri", None)})
+        return normalize_sources(sources)
 
     async def upload_file(self, file_path: Path) -> Any:
         # テキスト系はOSごとのMIME推定に任せず、モデルが受け取れるtext/plainへ揃える。
@@ -234,17 +226,15 @@ class GeminiService:
         on_usage: Callable[[Any], None] | None = None,
     ) -> dict[str, Any]:
         prompt = build_document_summary_prompt(document_name)
-        response = await generate_content(
-            self._client,
+        response = await generate_json_content(
+            generate_content, self._client,
             model=model_name,
             contents=[prompt, uploaded_file],
             timeout=DOCUMENT_SUMMARY_TIMEOUT_SECONDS,
-            temperature=0,
-            response_mime_type="application/json",
         )
         if on_usage is not None:
             on_usage(getattr(response, "usage_metadata", None))
-        parsed = extract_json_object(safe_response_text(response) or "", required_keys=("summary",))
+        _, _, parsed = read_json_response(response, required_keys=("summary",))
         if not parsed:
             raise ValueError("要約JSONを取得できませんでした。")
         summary = parsed.get("summary")
