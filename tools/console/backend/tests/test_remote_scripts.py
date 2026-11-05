@@ -857,6 +857,40 @@ class DbTableScriptTests(unittest.TestCase):
         self.assertEqual(values["好きなもの"], ["猫", "カレー", "RPG"])
         self.assertEqual(values["anniversaries"][0]["label"], "誕生日")
 
+    def test_deep_json_keeps_other_rows_visible_and_database_unchanged(self) -> None:
+        # パーサー・表示用変換・出力の再帰上限をまたぐ複数の深さ。
+        deep = "[" * 1500 + "0" + "]" * 1500
+        medium = "[" * 600 + "0" + "]" * 600
+        near_limit = "[" * 995 + "0" + "]" * 995
+        con = sqlite3.connect(self.db_path)
+        try:
+            con.executemany("INSERT INTO profile (user_id, key, value) VALUES (?, ?, ?)", [
+                ("fictional", "deep", deep), ("fictional", "medium", medium),
+                ("fictional", "near_limit", near_limit),
+                ("fictional", "normal", '["架空"]'),
+            ])
+            con.commit()
+        finally:
+            con.close()
+        before = self.db_path.read_bytes()
+        rows = self.read("profile")["rows"]
+        values = {row["cells"]["key"]: row["cells"]["value"] for row in rows
+                  if row["cells"]["user_id"] == "fictional"}
+        self.assertEqual(values["deep"], deep)
+        self.assertEqual(values["normal"], ["架空"])
+        # Python の版ごとに再帰上限へ達する深さが異なる。
+        for key, raw, depth in (("medium", medium, 600), ("near_limit", near_limit, 995)):
+            item = values[key]
+            if isinstance(item, str):
+                self.assertEqual(item, raw)
+            else:
+                for _ in range(depth):
+                    self.assertIsInstance(item, list)
+                    self.assertEqual(len(item), 1)
+                    item = item[0]
+                self.assertEqual(item, 0)
+        self.assertEqual(self.db_path.read_bytes(), before)
+
     def test_opted_out_user_samples_and_analysis_are_not_returned(self) -> None:
         con = sqlite3.connect(self.db_path)
         con.execute(

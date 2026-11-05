@@ -85,7 +85,7 @@ def parse_json_column(value):
         return value
     try:
         return json.loads(value)
-    except ValueError:
+    except (ValueError, RecursionError):
         return value
 
 
@@ -154,8 +154,19 @@ def read_table(con, table, offset, limit):
                 hidden.append(column)
                 continue
             if column in spec["json"]:
-                value = parse_json_column(value)
-            cells[column] = to_json_value(column, value)
+                try:
+                    converted = to_json_value(column, parse_json_column(value))
+                    # 最終出力で行やセルの外側に付く階層も含めて書き出せるか確かめる。
+                    probe = converted
+                    for _ in range(10):
+                        probe = [probe]
+                    json.dumps(probe)
+                    cells[column] = converted
+                except RecursionError:
+                    # 解析できても表示用変換や JSON 出力が深さの上限に達する場合がある。
+                    cells[column] = value
+            else:
+                cells[column] = to_json_value(column, value)
             if column in USER_COLUMNS and value not in (None, ""):
                 seen_users.add(str(value))
         item = {"cells": cells}

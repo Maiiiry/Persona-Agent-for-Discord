@@ -187,6 +187,21 @@ class GuildSettingsPersistOrderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.saved, ["2026-01-01"])
         self.assertEqual(self.settings.anniversary_posted_dates, {"test-user:架空の記念日": "2026-01-01"})
 
+    async def test_anniversary_record_canceled_while_waiting_for_lock_is_saved(self) -> None:
+        await self.settings._persist_lock.acquire()
+        task = asyncio.create_task(self.settings.record_anniversary_post("test-user", "架空の記念日", "2026-01-01"))
+        try:
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+        finally:
+            self.settings._persist_lock.release()
+            self.db.release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        self.assertEqual(self.db.saved, ["2026-01-01"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -135,6 +135,39 @@ class GuildRejoinTests(unittest.IsolatedAsyncioTestCase):
             post.assert_awaited_once()
         self.assertEqual(self.db.anniversary_posts_load_all()[1], {"11:誕生日": "2027-01-01"})
 
+    async def test_rejoin_waits_for_anniversary_write_even_when_canceled(self) -> None:
+        old = await self.state.get_guild_async(1)
+        entered, release = asyncio.Event(), threading.Event()
+        loop = asyncio.get_running_loop()
+        original = self.db.anniversary_post_record
+
+        def record(*args):
+            loop.call_soon_threadsafe(entered.set)
+            if not release.wait(5):
+                raise AssertionError("記念日の保存待機が解除されませんでした。")
+            original(*args)
+
+        with patch.object(self.db, "anniversary_post_record", side_effect=record):
+            save = asyncio.create_task(old.record_anniversary_post("11", "誕生日", "2026-01-01"))
+            restored_task = None
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                save.cancel()
+                self.state.forget_guild(1)
+                restored_task = asyncio.create_task(self.state.get_guild_async(1))
+                # 別サーバーは保存待ちに巻き込まれない。
+                other = await asyncio.wait_for(self.state.get_guild_async(2), 2)
+                self.assertEqual(other.guild_id, 2)
+                await asyncio.sleep(0.05)
+                self.assertFalse(restored_task.done())
+            finally:
+                release.set()
+                await asyncio.gather(save, return_exceptions=True)
+                if restored_task is not None:
+                    restored = await asyncio.wait_for(restored_task, 5)
+            self.assertTrue(save.cancelled())
+            self.assertEqual(restored.anniversary_posted_dates, {"11:誕生日": "2026-01-01"})
+
     async def test_anniversary_only_guild_is_restored_and_new_guild_uses_defaults(self) -> None:
         self.db.anniversary_post_record(1, "11", "誕生日", "2026-01-01")
         self.db.anniversary_post_record(2, "22", "記念日", "2026-01-02")
