@@ -15,7 +15,7 @@ from persona_bot.config.constants import (
     DM_SETTINGS_GUILD_KEY,
 )
 from persona_bot.config.personas import current_persona_catalog, persona_file_name
-from persona_bot.core.background import run_in_thread
+from persona_bot.core.background import run_in_thread, wait_for_cleanup
 from persona_bot.core.guild_settings_fields import GUILD_SETTINGS_DEFAULTS, GUILD_SETTINGS_FIELDS
 
 
@@ -248,19 +248,22 @@ class GuildSettings:
     async def record_anniversary_post(self, user_id: str, label: str, posted_date: str) -> None:
         """記念日のお祝いを投稿したことを、メモリと DB の両方へ記録する。
 
-        見回りがキャンセルされても、書き込みの完了を待ってからキャンセルを伝える
-        （`run_in_thread`）。記録は (サーバー, ユーザー, 記念日) ごとの上書きで、
-        同じ記念日を同じ日に2回書くことはないため、ロックは持たない。
+        再参加時の復元は同じサーバーの保存を待つ。ロック待ち中に見回りが
+        キャンセルされても、投稿済みの記録を保存してからキャンセルを伝える。
         """
         self.anniversary_posted_dates[f"{user_id}:{label}"] = posted_date
         if self._db is None:
             return
-        try:
-            await run_in_thread(
-                self._db.anniversary_post_record, self.persist_key, user_id, label, posted_date
-            )
-        except Exception as error:
-            logger.error(f'記念日の投稿記録の保存に失敗しました (guild_id=<ID>): {type(error).__name__}', exc_info=error)
+        async def save() -> None:
+            async with self._persist_lock:
+                try:
+                    await run_in_thread(
+                        self._db.anniversary_post_record, self.persist_key, user_id, label, posted_date
+                    )
+                except Exception as error:
+                    logger.error(f'記念日の投稿記録の保存に失敗しました (guild_id=<ID>): {type(error).__name__}', exc_info=error)
+
+        await wait_for_cleanup(save(), label="記念日の投稿記録")
 
 
 def _persisted_channel_id(key: str, value: Any) -> int | None:
