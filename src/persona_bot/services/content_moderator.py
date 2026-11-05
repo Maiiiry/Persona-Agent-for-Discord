@@ -21,8 +21,8 @@ from persona_bot.config.constants import (
 )
 from persona_bot.services.agent_plan import AgentPlan, normalize_agent_plan
 from persona_bot.services.ng_word_service import NgWordFilter
-from persona_bot.services.genai_client import generate_content
-from persona_bot.utils.storage import extract_json_object, get_prompt_block_reason, safe_response_text
+from persona_bot.services.genai_client import generate_content, generate_json_content
+from persona_bot.utils.storage import read_json_response
 from persona_bot.utils.timeutil import format_weekday, resolve_timezone, timezone_label
 from persona_bot.utils.normalization import (
     normalize_extracted_text, normalize_memory_category, normalize_recurrence,
@@ -353,28 +353,26 @@ class ContentModerator:
     ) -> tuple[str, str, dict[str, Any] | None]:
         """判定を「安全・不適切・判定不能」の3段階で返す。例外は外へ漏らさない。"""
         try:
-            response = await generate_content(
-                self._genai_client, model=self._model_name, contents=prompt[1],
+            response = await generate_json_content(
+                generate_content, self._genai_client, model=self._model_name, contents=prompt[1],
                 system_instruction=prompt[0],
-                timeout=self._timeout, temperature=0, response_mime_type="application/json",
+                timeout=self._timeout,
                 response_schema=schema,
             )
 
             # Gemini がプロンプト自体をブロックした場合
             # → コンテンツが不適切だと Gemini が判断したので unsafe 扱い
-            reason_name = get_prompt_block_reason(response)
+            reason_name, result_text, parsed = read_json_response(response, required_keys=("safe",))
             if reason_name is not None:
                 logger.warning("モデレーション: プロンプトがブロックされました。")
                 return VERDICT_UNSAFE, f"安全フィルタによりブロック ({reason_name})", None
 
             # SDKの応答差異や空候補を各呼出側で処理せず、共通入口で安全に読む。
-            result_text = safe_response_text(response)
             if result_text is None:
                 # 明示的なプロンプトブロックは上で判定済み。本文の欠落だけでは違反としない。
                 logger.warning("モデレーション: テキスト取得失敗のため通過扱いにします。")
                 return VERDICT_UNKNOWN, "", None
 
-            parsed = extract_json_object(result_text, required_keys=("safe",))
             if parsed is None:
                 # パース失敗は通過扱い（fail-open）。
                 logger.warning("モデレーション: 応答パース失敗のため通過扱いにします。")

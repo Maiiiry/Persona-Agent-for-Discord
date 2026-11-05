@@ -26,16 +26,14 @@ from persona_bot.config.constants import (
     ROUTER_TIMEOUT_SECONDS,
 )
 from persona_bot.core.database import Database
-from persona_bot.services.genai_client import generate_content
+from persona_bot.services.genai_client import generate_content, generate_json_content
 from persona_bot.utils.anniversaries import parse_anniversary
 from persona_bot.utils.normalization import normalize_memory_category
 from persona_bot.utils.timeutil import parse_iso_datetime, utc_now_iso
 from persona_bot.services.prompting import build_memory_compaction_prompt, build_router_prompt
 from persona_bot.utils.storage import (
-    extract_json_object,
-    get_prompt_block_reason,
+    read_json_response,
     load_json_file,
-    safe_response_text,
     write_json_file,
 )
 
@@ -275,11 +273,11 @@ class MemoryService:
 
         try:
             router_prompt = build_router_prompt(question)
-            response = await generate_content(
-                self._genai_client, model=ROUTER_MODEL_NAME, contents=router_prompt,
-                timeout=ROUTER_TIMEOUT_SECONDS, temperature=0, response_mime_type="application/json",
+            response = await generate_json_content(
+                generate_content, self._genai_client, model=ROUTER_MODEL_NAME, contents=router_prompt,
+                timeout=ROUTER_TIMEOUT_SECONDS,
             )
-            parsed = extract_json_object(safe_response_text(response) or "", required_keys=("category",))
+            _, _, parsed = read_json_response(response, required_keys=("category",))
             return normalize_memory_category((parsed or {}).get("category"))
         except Exception as error:
             logger.error("ルーティング判定に失敗しました。", exc_info=error)
@@ -590,17 +588,16 @@ class MemoryService:
             ANNIVERSARY_PROFILE_KEY,
         )
 
-        response = await generate_content(
-            self._genai_client, model=ROUTER_MODEL_NAME, contents=compactor_prompt,
-            timeout=MEMORY_COMPACT_TIMEOUT_SECONDS, temperature=0, response_mime_type="application/json",
+        response = await generate_json_content(
+            generate_content, self._genai_client, model=ROUTER_MODEL_NAME, contents=compactor_prompt,
+            timeout=MEMORY_COMPACT_TIMEOUT_SECONDS,
         )
 
         # Gemini がプロンプトをブロックした場合を検知
-        reason_name = get_prompt_block_reason(response)
+        reason_name, _, parsed = read_json_response(response, required_keys=("profile", "projects"))
         if reason_name is not None:
             raise _PromptBlockedError(reason_name)
 
-        parsed = extract_json_object(safe_response_text(response) or "", required_keys=("profile", "projects"))
         if not parsed:
             return None, None
 

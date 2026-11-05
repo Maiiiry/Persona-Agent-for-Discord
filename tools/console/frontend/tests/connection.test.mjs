@@ -18,6 +18,7 @@ function compile(source, modules) {
 const source = async (name) => (await readFile(new URL(`../src/${name}`, import.meta.url), "utf8")).replaceAll("\r\n", "\n");
 const scopes = compile(await source("requestScope.ts"), {});
 const appSource = await source("App.tsx");
+const confirmationsSource = await source("confirmations.tsx");
 const controllerSource = await source("controllers.ts");
 const dataSource = await source("pages/DataPage.tsx");
 const privacySource = await source("privacy.ts");
@@ -90,6 +91,7 @@ function consoleHarness(api, renderTree = false) {
     "./pages/OperationsPage": { OperationsPage: "OperationsPage" },
   };
   modules["./controllers"] = compile(controllerSource, modules);
+  modules["./confirmations"] = compile(confirmationsSource, modules);
   const controls = "busyAction, requestAction, confirmOpen, requestDeploy, runDeploy, confirm, applyConnection, refreshStatus, refreshInsights, refreshDeploy, handleConnect, handleDisconnect, runAction, status, insights, deploy, stateUnknown, statusError, insightsError, setSelectedProfileId, setProfiles, setPrivacyOn, setStoredPage, notify, privacy";
   const exported = appSource.replace("function Console() {", "export function Console() {");
   const instrumented = renderTree

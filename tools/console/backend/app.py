@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from service_jobs import last_line as _last_line, wait_for_service_job
 import remote_commands as rc
 from async_utils import CancellationState, await_shielded
 from deploy import DeployManager
@@ -446,32 +447,12 @@ async def _run_service_control(service: str, action: str, label: str) -> Command
 async def _wait_for_service_job(service: str) -> None:
     """systemctl自体の終了だけでは残り得る、当該unitのジョブを期限付きで確認する。"""
     _mark_service_completion_pending()
-    deadline = time.monotonic() + SERVICE_JOB_TIMEOUT_SECONDS
-    try:
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise SshError("systemdジョブの終了確認が期限を超えました。")
-            result = await session.run(
-                rc.service_job_command(service), label="サービス操作の終了確認",
-                timeout=min(SERVICE_JOB_TIMEOUT_SECONDS, remaining),
-            )
-            if result.exit_status != 0:
-                raise SshError("systemdジョブの状態を取得できませんでした。")
-            job = rc.parse_service_job(result.stdout)
-            if job == 0:
-                return
-            _mark_service_completion_pending()
-            await asyncio.sleep(min(SERVICE_JOB_POLL_SECONDS, max(0, deadline - time.monotonic())))
-    except Exception as error:
-        session.command_state_unknown = True
-        raise CommandStateUnknownError(
-            "サービス操作のsystemdジョブが終了したことを確認できず、状態不明です。"
-            "サーバーで処理の終了とサービスの状態を確認してからバックエンドを起動し直してください。"
-        ) from error
-    except asyncio.CancelledError:
-        session.command_state_unknown = True
-        raise
+    await wait_for_service_job(
+        session, service, timeout=SERVICE_JOB_TIMEOUT_SECONDS, poll=SERVICE_JOB_POLL_SECONDS,
+        on_wait=_mark_service_completion_pending,
+        unknown_message=("サービス操作のsystemdジョブが終了したことを確認できず、状態不明です。"
+                         "サーバーで処理の終了とサービスの状態を確認してからバックエンドを起動し直してください。"),
+    )
 
 
 @app.get("/api/operations")
@@ -611,11 +592,6 @@ async def get_db_table(table: str, offset: int = 0, limit: int = 50) -> dict:
 
 
 # ---------------------------------------------------------------- 補助
-
-
-def _last_line(text: str) -> str:
-    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
-    return lines[-1] if lines else ""
 
 
 def _unset_profile_message(profile: Profile, source: str) -> str:

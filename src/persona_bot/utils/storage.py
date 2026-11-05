@@ -154,6 +154,13 @@ def safe_response_text(response: Any) -> str | None:
         return None
 
 
+def read_json_response(response: Any, *, required_keys: tuple[str, ...] = ()) -> tuple[str | None, str | None, dict[str, Any] | None]:
+    """ブロック理由・本文・必要なキーを含む JSON を個別に返す。"""
+    reason = get_prompt_block_reason(response)
+    text = None if reason is not None else safe_response_text(response)
+    return reason, text, extract_json_object(text or "", required_keys=required_keys)
+
+
 # SDK が thought=True やコード・関数呼び出しのパートとして返すものは response.text の時点で除かれる。
 # 以下は、それらが目印を失って通常の text として返ったときの見出し。行全体がこの見出しだけの行
 # （コードフェンスの開始記号つきを含む）に限り、文中に現れる同じ語には反応しない。

@@ -58,11 +58,11 @@ from persona_bot.config.constants import (
     LIVE_VAD_SILENCE_MS,
     LIVE_VAD_START_GAP_MS,
     LIVE_VAD_START_MS,
-    BLACKLIST_MAX_VIOLATIONS,
 )
 from persona_bot.config.paths import load_persona_template
 from persona_bot.config.personas import current_persona_catalog
 from persona_bot.core.background import spawn, wait_for_cleanup
+from persona_bot.services.violation_notice import record_violation_notice
 from persona_bot.services.content_moderator import VERDICT_SAFE, VERDICT_UNSAFE
 from persona_bot.services.live_session import CLOSED_QUOTA, LiveOptions, LiveSession, LiveUnavailableError
 from persona_bot.services.prompting import build_live_system_instruction
@@ -904,27 +904,14 @@ class VoiceConversation:
     async def _record_violation(self, user_id: int) -> None:
         member = self.guild.get_member(user_id)
         name = str(member) if member is not None else str(user_id)
-        try:
-            count, just_blocked = await self._service.blacklist.record_violation(user_id, name)
-        except Exception as error:
-            # 保存できなかった違反は回数に数えない（message_handler.notify_violation と同じ扱い）。
-            logger.error("音声会話: 違反の保存に失敗したため、今回の違反は回数に数えていません。", exc_info=error)
-            await self._notify(f"⚠️ {_NOTICE_INPUT_VIOLATION}", member)
-            return
+        text, just_blocked = await record_violation_notice(
+            self._service.blacklist, user_id, name, _NOTICE_INPUT_VIOLATION,
+            blocked_text="以降の音声は処理されません。", log=logger,
+        )
+        if text is not None:
+            await self._notify(text, member)
         if just_blocked:
-            logger.info("音声会話: %d回目の違反でブラックリストに登録しました。", count)
-            await self._notify(
-                f"🚫 違反が{BLACKLIST_MAX_VIOLATIONS}回に達したため、ブラックリストに登録されました。"
-                "以降の音声は処理されません。",
-                member,
-            )
             self._update_gate()
-        elif count >= BLACKLIST_MAX_VIOLATIONS:
-            logger.warning("音声会話: 既にブロック済みのため警告を省略します。")
-        else:
-            logger.info("音声会話: 違反を記録しました（%d/%d 回目）。", count, BLACKLIST_MAX_VIOLATIONS)
-            remaining = BLACKLIST_MAX_VIOLATIONS - count
-            await self._notify(f"⚠️ {_NOTICE_INPUT_VIOLATION}（あと{remaining}回で応答を停止します）", member)
 
     async def _judge_input(self, utterance: _Utterance) -> None:
         """話し終わった発言の文字起こしが出そろうのを待って、AI モデレーションに掛ける。"""

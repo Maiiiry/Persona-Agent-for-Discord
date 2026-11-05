@@ -501,7 +501,7 @@ class AdministratorAndConstantsTests(unittest.IsolatedAsyncioTestCase):
         handler = MessageHandler.__new__(MessageHandler)
         handler.blacklist = SimpleNamespace(record_violation=AsyncMock(return_value=(5, True)))
         message = SimpleNamespace(author=SimpleNamespace(id=11), reply=AsyncMock())
-        with patch("persona_bot.core.message_handler.BLACKLIST_MAX_VIOLATIONS", 5):
+        with patch("persona_bot.services.violation_notice.BLACKLIST_MAX_VIOLATIONS", 5):
             await handler.notify_violation(message, "架空の警告")
         self.assertIn("違反が5回に達したため", message.reply.call_args.args[0])
 

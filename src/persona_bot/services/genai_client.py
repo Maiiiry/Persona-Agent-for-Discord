@@ -95,3 +95,8 @@ async def generate_content(
     )
     request = client.aio.models.generate_content(model=model, contents=contents, config=config)
     return await asyncio.wait_for(request, timeout=timeout) if timeout is not None else await request
+
+
+async def generate_json_content(sender, client: Any, **options: Any) -> Any:
+    """JSON 生成設定を共通化し、呼出元の期限とスキーマはそのまま渡す。"""
+    return await sender(client, temperature=0, response_mime_type="application/json", **options)
