@@ -234,6 +234,18 @@ def register_commands(
         is_current: Callable[[], bool],
     ) -> None:
         guild = interaction.guild
+
+        async def requester_moved() -> bool:
+            current_channel = getattr(getattr(interaction.user, "voice", None), "channel", None)
+            if getattr(current_channel, "id", None) == voice_channel.id:
+                return False
+            await interaction.followup.send(
+                "⚠️ ボイスチャンネルの参加状態が変わったため、接続を中止しました。もう一度 /join を実行してください。"
+            )
+            return True
+
+        if await requester_moved():
+            return
         # 自律行動でボットが自分から通話に入っている最中かもしれない。人が呼んだ
         # 接続を優先するため、ステージ枠の後始末まで含めて先に配信を終了させる
         # （ここを素の disconnect だけで済ませると、ボットが開いたステージ枠が
@@ -243,6 +255,8 @@ def register_commands(
                 guild.id, reason=f"/join による上書き（{interaction.user}）"
             )
             if await skip_superseded_voice_operation(interaction, is_current):
+                return
+            if await requester_moved():
                 return
             voice_client = guild.voice_client
             if voice_client is not None:
@@ -271,10 +285,12 @@ def register_commands(
                     return
                 # 切り替えの前に保護を解く。移動を戻している最中の処理が、切る予定の接続を
                 # 元のチャンネルへ動かそうとしないようにする。
-                if voice_guard is not None:
-                    voice_guard.release(guild.id)
                 if live_voice is not None:
                     await live_voice.stop(guild.id, reason="/join による接続先の切り替え")
+                    if await requester_moved():
+                        return
+                if voice_guard is not None:
+                    voice_guard.release(guild.id)
                 try:
                     await wait_for_cleanup(
                         voice_client.disconnect(force=True), label="参加前のボイス切断",
@@ -288,6 +304,8 @@ def register_commands(
                     return
 
         if await skip_superseded_voice_operation(interaction, is_current):
+            return
+        if await requester_moved():
             return
         reservation = live_voice.reserve(guild.id) if live_voice is not None and guild is not None else None
         if live_voice is not None and guild is not None and not reservation:

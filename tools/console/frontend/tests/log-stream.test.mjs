@@ -213,6 +213,23 @@ test("SSH切断で受信を閉じ、接続先の切替では新しいソケッ�
   assert.equal(h.read().status, "idle");
 });
 
+test("切断直前の未反映ログを残し、接続先の切替では混ぜない", (t) => {
+  const h = harness(t);
+  h.sockets[0].message({type: "entry", entry});
+  assert.deepEqual(h.disable().entries.map(({message}) => message), [entry.message]);
+  assert.equal(h.intervals.size, 0);
+  h.switchConnection();
+  assert.deepEqual(h.read().entries.map(({message}) => message), [entry.message]);
+});
+
+test("接続先を直接切り替えると未反映ログは新しい表示へ混ざらない", (t) => {
+  const h = harness(t);
+  h.sockets[0].message({type: "entry", entry});
+  assert.deepEqual(h.switchConnection().entries, []);
+  h.sockets[1].message({type: "entry", entry: {...entry, message: "新しい接続先"}});
+  assert.deepEqual(h.flush().entries.map(({message}) => message), ["新しい接続先"]);
+});
+
 test("ソケット作成失敗と壊れた受信はエラーとして停止する", (t) => {
   const h = harness(t, { throws: true });
   assert.equal(h.read().status, "error");

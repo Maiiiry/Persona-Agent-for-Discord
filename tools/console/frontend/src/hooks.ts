@@ -361,6 +361,9 @@ export function useLogStream(enabled: boolean, initialLines = 300, connectionKey
     return () => {
       disposed = true;
       window.clearInterval(flushTimer);
+      const batch = bufferRef.current;
+      bufferRef.current = [];
+      if (batch.length > 0) setEntries((previous) => appendLogEntries(previous, batch));
       socket.close();
     };
   }, [enabled, initialLines, reconnectToken, connectionKey]);
