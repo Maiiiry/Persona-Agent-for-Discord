@@ -45,5 +45,5 @@ body:
           required: true
         - label: シークレット・個人情報を含めていません。
           required: true
-        - label: "[行動規範](https://github.com/RI0806123789/Persona-Chat-in-Discord/blob/main/CODE_OF_CONDUCT.md) に従います。"
+        - label: "[行動規範](https://github.com/RI0806123789/Persona-Agent-for-Discord/blob/main/CODE_OF_CONDUCT.md) に従います。"
           required: true

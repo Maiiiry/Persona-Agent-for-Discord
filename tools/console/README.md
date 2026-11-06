@@ -1,6 +1,6 @@
 # Persona Bot Console
 
-Persona Chat in Discord のボットを、**SSH 経由で**見守り・操作するための開発者用ダッシュボードです（BETA）。
+Persona Agent for Discord のボットを、**SSH 経由で**見守り・操作するための開発者用ダッシュボードです（BETA）。
 デザイン言語は **Material 3 Expressive** を採用しています。
 
 - フロントエンド: React 19 + TypeScript + Vite

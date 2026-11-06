@@ -1,4 +1,4 @@
-# Persona Chat in Discord
+# Persona Agent for Discord
 
 ## 🛠️ 技術スタック
 
@@ -50,7 +50,7 @@ NGワードは登録語と本文を同じ基準で照合し、全半角・大文
 ## 📁 ディレクトリ構成
 
 ```
-Persona Chat in Discord/
+Persona-Agent-for-Discord/
 ├── .venv/                                      # Python 仮想環境（Git 管理対象外。python -m venv で作成）
 ├── src/
 │   ├── bot.py                                  # 起動・設定とサービスの配線（起動方法は従来どおり）
@@ -589,6 +589,10 @@ DBの初期化・設定保存と復元、文書処理の異常系、会話リセ
 過去バージョンの記載にある `memory/`・`ng/` は当時の保存先です。現在の配置は上のディレクトリ構成と移行手順を参照してください。
 
 ### ver0.2.0(BETA)
+
+#### その他の変更
+
+- **プロジェクト名の変更**: プロジェクト名を Persona Agent for Discord に変更し、リポジトリの URL と各種ドキュメントを新しい名前に合わせた。既存環境のフォルダ名を変更する必要はない。
 
 #### 不具合修正
 

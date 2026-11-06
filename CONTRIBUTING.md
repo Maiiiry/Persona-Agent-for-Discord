@@ -4,7 +4,7 @@
 
 ## Issueで相談する
 
-最初に [既存のIssue](https://github.com/RI0806123789/Persona-Chat-in-Discord/issues) を検索し、同じ内容があればそのIssueへ情報を追加してください。新しい報告には、[バグ報告・機能提案フォーム](https://github.com/RI0806123789/Persona-Chat-in-Discord/issues/new/choose) を使います。
+最初に [既存のIssue](https://github.com/RI0806123789/Persona-Agent-for-Discord/issues) を検索し、同じ内容があればそのIssueへ情報を追加してください。新しい報告には、[バグ報告・機能提案フォーム](https://github.com/RI0806123789/Persona-Agent-for-Discord/issues/new/choose) を使います。
 
 - バグ報告には、OS、Python・ライブラリのバージョン、再現手順、期待する結果と実際の結果を記載する。
 - 機能提案には、困っていること、使う場面、希望する動作、代替案を記載する。
@@ -18,9 +18,9 @@ APIキー、Discordのトークン、個人情報、実際の会話ログを公�
 GitHubでこのリポジトリをForkし、次のコマンドで取得します。`YOUR_GITHUB_ACCOUNT` を自分のアカウント名に置き換えてください。
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_ACCOUNT/Persona-Chat-in-Discord.git
-cd Persona-Chat-in-Discord
-git remote add upstream https://github.com/RI0806123789/Persona-Chat-in-Discord.git
+git clone https://github.com/YOUR_GITHUB_ACCOUNT/Persona-Agent-for-Discord.git
+cd Persona-Agent-for-Discord
+git remote add upstream https://github.com/RI0806123789/Persona-Agent-for-Discord.git
 git switch -c feat/short-description
 ```
 
