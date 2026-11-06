@@ -62,6 +62,22 @@ class DownsamplerTests(unittest.TestCase):
     def test_too_short_input_returns_nothing(self):
         self.assertEqual(Downsampler().process(b"\x01\x00"), b"")
 
+    def test_arbitrary_byte_fragments_preserve_stereo_frames(self):
+        pcm = _stereo_tone(440, 0.05)
+        whole = Downsampler().process(pcm)
+        for size in (1, 2, 3, 5, 7, 13):
+            with self.subTest(size=size):
+                streaming = Downsampler()
+                pieces = [streaming.process(pcm[i:i + size]) for i in range(0, len(pcm), size)]
+                self.assertEqual(b"".join(pieces), whole)
+
+    def test_incomplete_stereo_frame_waits_without_advancing_filter(self):
+        pcm = bytes(range(8))
+        streaming = Downsampler()
+        self.assertEqual(streaming.process(pcm[:3]), b"")
+        self.assertEqual(streaming.process(b""), b"")
+        self.assertEqual(streaming.process(pcm[3:]), Downsampler().process(pcm))
+
 
 class UpsamplerTests(unittest.TestCase):
     def test_twenty_four_kilohertz_mono_becomes_stereo_with_double_length(self):

@@ -53,13 +53,17 @@ class Downsampler:
         self._history = np.zeros(len(self._taps) - 1, dtype=np.float32)
         # これまでに受け取ったサンプル数を間引き比で割った余り（断片の長さが比の倍数でなくても位相を保つ）。
         self._offset = 0
+        self._pending = b""
 
     def process(self, pcm: bytes) -> bytes:
-        samples = np.frombuffer(pcm, dtype=np.int16)
-        if samples.size < TTS_CHANNELS:
+        data = self._pending + pcm
+        frame_bytes = TTS_CHANNELS * 2
+        usable = len(data) - len(data) % frame_bytes
+        self._pending = data[usable:]
+        if usable == 0:
             return b""
-        # 端数のバイトは捨て、L/R の平均でモノラルにする。
-        frames = samples[: samples.size - samples.size % TTS_CHANNELS].reshape(-1, TTS_CHANNELS)
+        # ステレオフレームの端数は次へ持ち越し、L/R の平均でモノラルにする。
+        frames = np.frombuffer(data[:usable], dtype=np.int16).reshape(-1, TTS_CHANNELS)
         mono = frames.astype(np.float32).mean(axis=1)
         buffer = np.concatenate((self._history, mono))
         filtered = np.convolve(buffer, self._taps, mode="valid")

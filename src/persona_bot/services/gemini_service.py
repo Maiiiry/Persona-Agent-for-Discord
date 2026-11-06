@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import re
 from math import ceil
 from pathlib import Path
 from time import monotonic
@@ -51,13 +52,35 @@ def _grounding_is_unsupported(status_code: Any, message: str) -> bool:
     ))
 
 
-def _grounding_quota_exhausted(status_code: Any) -> bool:
+def _error_status_code(error: BaseException) -> int | None:
+    """SDK と HTTP クライアントの例外から HTTP ステータスを読み取る。"""
+    for code in (
+        getattr(error, "code", None), getattr(error, "status_code", None),
+        getattr(getattr(error, "response", None), "status_code", None),
+    ):
+        if isinstance(code, str) and re.fullmatch(r"[0-9]{3}", code.strip()):
+            code = int(code.strip())
+        if isinstance(code, int) and not isinstance(code, bool) and 100 <= code <= 599:
+            return code
+    return None
+
+
+def _grounding_quota_exhausted(status_code: int | None, error: BaseException) -> bool:
     """検索付きの試行が利用枠（429）で断られたか。
 
     検索の利用枠はモデルの世代ごとに別に数えられ、Gemini 3 以降の検索は無料枠に含まれない。
     そのため選択モデルで断られても、検索用のサブモデルや検索なしの生成は通りうる。
     """
-    return status_code == 429
+    if status_code is not None:
+        return status_code == 429
+    # 型付きのステータスが無い旧形式だけを文面で補う。認証・サーバー障害のコードを優先する。
+    message = " ".join(str(part) for part in (
+        getattr(error, "status", ""), getattr(error, "code", ""), error,
+    )).lower()
+    return (
+        "resource_exhausted" in message or "resource exhausted" in message
+        or re.search(r"(?<!\d)429(?!\d)", message) is not None
+    )
 
 
 class GenerationResult(NamedTuple):
@@ -159,12 +182,12 @@ class GeminiService:
             except asyncio.TimeoutError:
                 raise
             except Exception as error:
-                status_code = getattr(error, "code", None)
+                status_code = _error_status_code(error)
                 if use_grounding and _grounding_is_unsupported(status_code, str(error)):
                     logger.warning("検索ツールが非対応のため、残り時間内で代替の生成を試します。", exc_info=error)
                     index += 1
                     continue
-                if use_grounding and _grounding_quota_exhausted(status_code):
+                if use_grounding and _grounding_quota_exhausted(status_code, error):
                     logger.warning("検索の利用枠を超えたため、残り時間内で代替の生成を試します。", exc_info=error)
                     index += 1
                     continue

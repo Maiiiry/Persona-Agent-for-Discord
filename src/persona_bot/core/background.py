@@ -32,6 +32,8 @@ from typing import Any, Callable, Coroutine
 import discord
 from discord.ext import tasks
 
+from persona_bot.config.constants import BACKGROUND_SHUTDOWN_TIMEOUT_SECONDS
+
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,10 @@ def task_scope(owner: "TaskOwner | None"):
         yield
     finally:
         _current_owner.reset(token)
+
+
+class ShutdownTimeoutError(TimeoutError):
+    """共有リソースを閉じる前のタスク回収が期限を超えた。"""
 
 
 class TaskOwner:
@@ -86,23 +92,33 @@ class TaskOwner:
         finally:
             self._tasks.pop(task, None)
 
-    async def shutdown(self) -> None:
-        """通常処理を一度だけ中断し、同期ワーカーと後片付けは完了を待つ。"""
+    def stop_accepting(self) -> None:
+        """新規受付と周期処理を止め、サービスの終了通知を先行できるようにする。"""
+        if self.stopping:
+            return
         self.stopping = True
-        loop_tasks = set()
         for loop in self._loops:
             task = loop.get_task()
             loop.cancel()
-            if task is not None:
-                loop_tasks.add(task)
-                if task not in self._tasks:
-                    self._track(task)
+            if task is not None and task not in self._tasks:
+                self._track(task)
+
+    async def shutdown(self, *, timeout: float = BACKGROUND_SHUTDOWN_TIMEOUT_SECONDS) -> None:
+        """通常処理を中断して回収する。期限超過でも保護タスクを強制中断しない。"""
+        self.stop_accepting()
+        loop_tasks = {loop.get_task() for loop in self._loops}
         current = asyncio.current_task()
         for task, protected in list(self._tasks.items()):
             if not protected and task not in loop_tasks and task is not current:
                 task.cancel()
-        while self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        deadline = asyncio.get_running_loop().time() + timeout
+        while pending := {task for task in self._tasks if task is not current and not task.done()}:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                logger.error("バックグラウンド処理の終了待機が期限を超えました（残り %d 件）。共有リソースは閉じません。", len(pending))
+                raise ShutdownTimeoutError("バックグラウンド処理の終了待機が期限を超えました。")
+            # wait_for/gatherの中断では、同期I/Oを保護する親まで再キャンセルしてしまう。
+            await asyncio.wait(pending, timeout=remaining)
             # 完了通知の実行順に依存せず、回収済みの参照を外す。
             self._tasks = {task: protected for task, protected in self._tasks.items() if not task.done()}
 
@@ -126,11 +142,10 @@ def spawn(
     else:
         with owner.scope():
             task = asyncio.create_task(coro)
+        owner._track(task, protected=_protected)
         if owner.stopping and not _protected:
             # 開始前に中断するので、渡されたコルーチンの本体は実行されない。
             task.cancel()
-        else:
-            owner._track(task, protected=_protected)
     _background_tasks.add(task)
     task.add_done_callback(lambda finished: _on_task_done(finished, label))
     return task

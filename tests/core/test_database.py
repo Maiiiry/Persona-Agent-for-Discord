@@ -66,6 +66,17 @@ class DatabaseInitializationTests(unittest.TestCase):
         self.assertEqual(self.db.profile_load("other-user"), {"趣味": "架空の読書"})
         self.assertEqual(len(self.db.pending_fetch_entries("test-user")), 1)
 
+    def test_schema_initialization_uses_one_explicit_transaction(self) -> None:
+        statements = []
+        self.db._conn.set_trace_callback(statements.append)
+        self.db.initialize()
+        first_commit = statements.index("COMMIT")
+        schema_statements = statements[:first_commit + 1]
+        self.assertEqual([sql for sql in schema_statements if sql.startswith("BEGIN")], ["BEGIN IMMEDIATE"])
+        self.assertTrue(any(sql.startswith("CREATE TABLE") for sql in schema_statements))
+        self.assertTrue(any(sql.startswith("PRAGMA user_version =") for sql in schema_statements))
+        self.assertFalse(self.db._conn.in_transaction)
+
     def prepare_version_five(self) -> None:
         # 繰り返し列を追加する前のDBに、架空の既存データを用意する。
         with patch.object(database, "SCHEMA_VERSION", 5):

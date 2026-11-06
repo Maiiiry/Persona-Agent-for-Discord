@@ -8,6 +8,10 @@ PROJECT_ROOT = BASE_DIR.parent
 LOG_FORMAT = "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 
+# サービス終了通知と残留タスクの回収に使う共通の待機上限。
+# 超過時は失敗を返し、使用中の共有クライアントやDBを先に閉じない。
+BACKGROUND_SHUTDOWN_TIMEOUT_SECONDS = 60.0
+
 # ペルソナ（キャラクター設定）のプロンプトを置くフォルダ。Git が管理するのは書式見本の
 # テンプレートだけで、キャラ別のファイルは利用者が各自のパソコン・サーバーで作る
 # （.gitignore で除外済み）。ここにある .txt がキャラ設定の選択肢になる（personas.py）。

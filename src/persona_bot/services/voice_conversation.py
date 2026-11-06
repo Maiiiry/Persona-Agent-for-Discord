@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from statistics import quantiles
@@ -36,6 +37,7 @@ from typing import Any, Callable
 import discord
 
 from persona_bot.audio.live_audio import DISCORD_FRAME_BYTES, LivePlaybackSource, Upsampler, frame_rms
+from persona_bot.audio.voice import _get_audio_player
 from persona_bot.audio.voice_receive import LiveVoiceClient, VoiceReceiver
 from persona_bot.config.constants import (
     LIVE_BARGE_IN_MS,
@@ -61,7 +63,7 @@ from persona_bot.config.constants import (
 )
 from persona_bot.config.paths import load_persona_template
 from persona_bot.config.personas import current_persona_catalog
-from persona_bot.core.background import spawn, wait_for_cleanup
+from persona_bot.core.background import run_in_thread, spawn, wait_for_cleanup
 from persona_bot.services.violation_notice import record_violation_notice
 from persona_bot.services.content_moderator import VERDICT_SAFE, VERDICT_UNSAFE
 from persona_bot.services.live_session import CLOSED_QUOTA, LiveOptions, LiveSession, LiveUnavailableError
@@ -152,6 +154,7 @@ class _Utterance:
     response_started: bool = False
     response_complete: bool = False
     first_audio_at: float | None = None
+    playback_started_at: float | None = None
     input_task: asyncio.Task[Any] | None = None
     # 入力の文字起こしが出そろった（サーバーの finished・返答の終わり・割り込みの通知・時間切れ）。
     transcript_closed: bool = False
@@ -302,6 +305,7 @@ class VoiceConversation:
         self._playback: LivePlaybackSource | None = None
         self._playback_owner: _Utterance | None = None
         self._playback_started = False
+        self._previous_player: threading.Thread | None = None
         self._upsampler = Upsampler()
         self._send_queue: asyncio.Queue[tuple[str, bytes]] = asyncio.Queue()
         # いまの Live の接続（世代）で activity_start を送ったか。送っていなければ None。
@@ -358,6 +362,7 @@ class VoiceConversation:
         except Exception:
             logger.warning("音声会話: 受信の停止に失敗しました。", exc_info=True)
         self._abort_playback()
+        await self._wait_previous_player()
         self._clear_send_queue()
         self._participants.clear()
         self._reservations.clear()
@@ -704,15 +709,18 @@ class VoiceConversation:
             self._interrupted = None
         model_turn = getattr(content, "model_turn", None)
         if model_turn is not None:
+            utterance = self._current
             for part in model_turn.parts or []:
                 inline = getattr(part, "inline_data", None)
                 if inline is not None and inline.data:
-                    self._on_model_audio(inline.data)
+                    await self._on_model_audio(inline.data)
+                    if self._stopped or self._current is not utterance:
+                        return
         transcription = getattr(content, "output_transcription", None)
         if transcription is not None and transcription.text:
             self._on_output_transcript(transcription.text)
         if getattr(content, "generation_complete", None) or getattr(content, "turn_complete", None):
-            self._on_generation_complete()
+            await self._on_generation_complete()
         if getattr(content, "turn_complete", None):
             self._on_turn_complete()
 
@@ -754,7 +762,7 @@ class VoiceConversation:
         if finished:
             self._close_transcript(utterance)
 
-    def _on_model_audio(self, data: bytes) -> None:
+    async def _on_model_audio(self, data: bytes) -> None:
         utterance = self._accepting_response()
         if utterance is None:
             return
@@ -769,7 +777,7 @@ class VoiceConversation:
             self._upsampler = Upsampler()
         self._playback.feed(self._upsampler.process(data))
         if not self._playback_started and self._playback.buffered_bytes >= _OUTPUT_BUFFER_BYTES:
-            self._start_playback()
+            await self._start_playback()
 
     def _on_output_transcript(self, text: str) -> None:
         utterance = self._accepting_response()
@@ -782,13 +790,13 @@ class VoiceConversation:
             utterance.output_ng = True
             self._discard_response(utterance, "出力の NG ワード")
 
-    def _on_generation_complete(self) -> None:
+    async def _on_generation_complete(self) -> None:
         if self._playback is None or self._playback_owner is not self._current:
             return
         self._playback.finish()
         if not self._playback_started:
             # バッファに満たない短い返答も、ここで流し始める。
-            self._start_playback()
+            await self._start_playback()
 
     def _on_turn_complete(self) -> None:
         if self._awaiting_interrupt_ack:
@@ -833,15 +841,19 @@ class VoiceConversation:
     # 再生
     # ==================================================================
 
-    def _start_playback(self) -> None:
+    async def _wait_previous_player(self) -> None:
+        player = self._previous_player
+        if player is not None:
+            await run_in_thread(player.join)
+            if self._previous_player is player:
+                self._previous_player = None
+
+    async def _start_playback(self) -> None:
         source = self._playback
         if source is None or self._playback_started:
             return
         self._playback_started = True
         owner = self._playback_owner
-        if owner is not None and owner.ended_at is not None:
-            # 性能目標（発話終了から初回音声の再生まで3秒以内）の計測点。終了時に P50/P95 を出す。
-            self._latencies.append(self._now() - owner.ended_at)
         loop = asyncio.get_running_loop()
 
         def after_playing(error: Exception | None) -> None:
@@ -851,9 +863,26 @@ class VoiceConversation:
             loop.call_soon_threadsafe(self._on_playback_finished, source)
 
         try:
+            # stop() や after 通知の後にも終了処理中のスレッドは残る。
+            # 参照を失う前に控え、共有のエンコーダーを次の再生へ渡す前に終了を待つ。
+            player = _get_audio_player(self.voice_client)
+            if player is not None:
+                self._previous_player = player
             if self.voice_client.is_playing() or self.voice_client.is_paused():
                 self.voice_client.stop()
+            await self._wait_previous_player()
+            if (self._stopped or self._playback is not source or source.aborted
+                    or owner is None or owner.discarded or not self.voice_client.is_connected()):
+                return
             self.voice_client.play(source, after=after_playing)
+            if owner.ended_at is not None and owner.playback_started_at is None:
+                # stall 後に同じ発話を再開しても初回だけ記録する。
+                owner.playback_started_at = self._now()
+                self._latencies.append(owner.playback_started_at - owner.ended_at)
+        except asyncio.CancelledError:
+            source.abort()
+            self._on_playback_finished(source)
+            raise
         except Exception as error:
             logger.error("音声会話: 再生を開始できませんでした。", exc_info=error)
             source.abort()
@@ -875,6 +904,9 @@ class VoiceConversation:
         started, self._playback_started = self._playback_started, False
         if started:
             try:
+                player = _get_audio_player(self.voice_client)
+                if player is not None:
+                    self._previous_player = player
                 if self.voice_client.is_playing() or self.voice_client.is_paused():
                     self.voice_client.stop()
             except Exception:

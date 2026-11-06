@@ -42,6 +42,56 @@ class RestoreAttachTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ClientCloseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_service_stop_precedes_cancellation_of_background_tasks(self) -> None:
+        client = PersonaClient(genai_client=object(), database=Mock(), intents=discord.Intents.none())
+        started = asyncio.Event()
+        order = []
+
+        async def work():
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                order.append("task")
+
+        async def stop():
+            self.assertTrue(client.background_tasks.stopping)
+            await run_in_thread(lambda: order.append("service"))
+
+        client.add_shutdown_callback(stop)
+        task = spawn(work(), label="架空の背景処理", owner=client.background_tasks)
+        await started.wait()
+        with patch.object(discord.Client, "close", new=AsyncMock()), \
+                patch.object(bot_client, "close_genai_client", new=AsyncMock()):
+            await client.close()
+        self.assertEqual(order, ["service", "task"])
+        self.assertTrue(task.cancelled())
+
+    async def test_shutdown_timeout_does_not_close_resources_in_use(self) -> None:
+        client = PersonaClient(genai_client=object(), database=Mock(), intents=discord.Intents.none())
+        release = asyncio.Event()
+        stop = AsyncMock(side_effect=release.wait)
+        client.add_shutdown_callback(stop)
+        with patch.object(discord.Client, "close", new=AsyncMock()) as discord_close, \
+                patch.object(bot_client, "close_genai_client", new=AsyncMock()) as gemini_close, \
+                patch.object(bot_client, "BACKGROUND_SHUTDOWN_TIMEOUT_SECONDS", 0.01):
+            try:
+                with self.assertLogs("persona_bot.core.background", level="ERROR"):
+                    for _ in range(2):
+                        with self.assertRaises(TimeoutError):
+                            await client.close()
+                stop.assert_awaited_once()
+                discord_close.assert_not_awaited()
+                gemini_close.assert_not_awaited()
+                client._database.close.assert_not_called()
+            finally:
+                release.set()
+                await client.background_tasks.shutdown(timeout=1)
+            await client.close()
+            discord_close.assert_awaited_once()
+            gemini_close.assert_awaited_once()
+            client._database.close.assert_called_once()
+
     async def test_owned_save_and_cleanup_finish_before_resources_close(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "bot.db"
@@ -190,7 +240,8 @@ class ClientCloseTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(child.cancelled())
 
     async def test_database_is_closed_last_even_when_earlier_steps_fail(self) -> None:
-        cases = [(None, None), (OSError("架空のDiscord終了失敗"), None), (None, OSError("架空のGemini終了失敗"))]
+        cases = [(None, None), (OSError("架空のDiscord終了失敗"), None), (None, OSError("架空のGemini終了失敗")),
+                 (TimeoutError("架空のDiscord終了期限超過"), None), (None, TimeoutError("架空のGemini終了期限超過"))]
         for discord_error, gemini_error in cases:
             with self.subTest(discord_error=discord_error, gemini_error=gemini_error):
                 order = []
@@ -209,6 +260,9 @@ class ClientCloseTests(unittest.IsolatedAsyncioTestCase):
                     if discord_error or gemini_error:
                         with self.assertRaises(OSError):
                             await client.close()
+                        if isinstance(discord_error or gemini_error, TimeoutError):
+                            with self.assertRaises(TimeoutError):
+                                await client.close()
                     else:
                         await client.close()
                 self.assertEqual(order, ["discord", "gemini", "db"])

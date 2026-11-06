@@ -4,6 +4,7 @@ Live の接続・Discord の受信と再生は模擬に差し替え、時計も�
 """
 
 import asyncio
+import threading
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -356,6 +357,82 @@ class ResponseTests(ConversationTestBase):
         self.voice_client.play.assert_not_called()
         await self.conversation._on_live_message(live_message(generation_complete=True))
         self.voice_client.play.assert_called_once()
+
+    async def test_stalled_reply_resumes_without_counting_latency_twice(self):
+        await self.complete_utterance()
+        await self.respond(complete=False)
+        first_latency = list(self.conversation._latencies)
+        source = self.voice_client.play.call_args.args[0]
+        # 通信待ちの無音が上限に達し、再生スレッドから終了が通知される。
+        while source.read():
+            pass
+        self.voice_client.play.call_args.kwargs["after"](None)
+        await self.settle()
+        self.advance(20)
+        await self.respond(complete=False)
+        self.assertEqual(self.voice_client.play.call_count, 2)
+        self.assertEqual(self.conversation._latencies, first_latency)
+
+    async def test_failed_playback_does_not_record_latency(self):
+        await self.complete_utterance()
+        self.voice_client.play.side_effect = discord.ClientException("架空の再生失敗")
+        with self.assertLogs(voice_conversation.logger, level="ERROR"):
+            await self.respond(complete=False)
+        self.assertEqual(self.conversation._latencies, [])
+
+    async def test_replacement_waits_for_previous_player(self):
+        await self.assert_replacement_waits(withdraw=False)
+
+    async def test_waiting_replacement_rechecks_consent(self):
+        await self.assert_replacement_waits(withdraw=True)
+
+    async def test_aborted_player_is_joined_after_stop_clears_reference(self):
+        await self.assert_replacement_waits(withdraw=False, abort_before=True)
+
+    async def assert_replacement_waits(self, *, withdraw, abort_before=False):
+        await self.complete_utterance()
+        if abort_before:
+            await self.respond(complete=False)
+        self.voice_client.play.reset_mock()
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        release = threading.Event()
+
+        class FinishingPlayer(threading.Thread):
+            def join(self, timeout=None):
+                loop.call_soon_threadsafe(entered.set)
+                super().join(timeout)
+
+        player = FinishingPlayer(target=lambda: release.wait(5))
+        player.start()
+        self.voice_client._player = player
+        self.voice_client.is_paused.return_value = True
+
+        def stop():
+            self.voice_client._player = None
+            self.voice_client.is_paused.return_value = False
+
+        self.voice_client.stop.side_effect = stop
+        if abort_before:
+            self.conversation._abort_playback()
+            self.assertIsNone(self.voice_client._player)
+        response = asyncio.create_task(self.respond(complete=False))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            self.voice_client.play.assert_not_called()
+            if withdraw:
+                self.conversation.withdraw(USER_B)
+            release.set()
+            await asyncio.wait_for(response, 2)
+            if withdraw:
+                self.voice_client.play.assert_not_called()
+            else:
+                self.voice_client.play.assert_called_once()
+        finally:
+            release.set()
+            await asyncio.gather(response, return_exceptions=True)
+            player.join()
+
 
     async def test_safe_turn_is_remembered_and_updates_affinity_for_consenting_user(self):
         await self.complete_utterance()

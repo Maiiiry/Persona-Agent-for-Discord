@@ -178,6 +178,51 @@ class GeminiGenerationTests(GeminiRequestFixture):
         self.assertEqual(self.models(), ["selected-model", gemini_service.GROUNDING_MODEL_NAME])
         self.assertEqual(self.search_flags(), [True, True])
 
+    async def test_search_quota_recognizes_alternate_status_formats(self) -> None:
+        status_error = RuntimeError("架空の利用枠超過")
+        status_error.status_code = "429"
+        response_error = httpx.HTTPStatusError(
+            "架空の利用枠超過", request=httpx.Request("POST", "https://example.invalid/generate"),
+            response=httpx.Response(429),
+        )
+        symbolic_error = RuntimeError("架空の利用枠超過")
+        symbolic_error.code = "RESOURCE_EXHAUSTED"
+        for error in (status_error, response_error, symbolic_error, RuntimeError("resource_exhausted"),
+                      RuntimeError("429 Too Many Requests")):
+            with self.subTest(error=type(error).__name__, message=str(error)):
+                self.sdk_request.reset_mock()
+                self.sdk_request.side_effect = [error, self.response]
+                result = await self.service.generate("質問", "selected-model", timeout=30, grounding=True)
+                self.assertEqual(result[0], "架空の応答")
+                self.assertEqual(self.search_flags(), [True, True])
+
+    async def test_structured_status_prevents_text_only_quota_false_positive(self) -> None:
+        for code in (401, 403, 500, 503):
+            with self.subTest(code=code):
+                error = RuntimeError("架空の診断: resource_exhausted 429")
+                error.status_code = code
+                self.sdk_request.reset_mock()
+                self.sdk_request.side_effect = error
+                result = await self.service.generate("質問", "selected-model", timeout=30, grounding=True)
+                self.assertIsNone(result[0])
+                self.sdk_request.assert_awaited_once()
+
+    async def test_text_only_quota_without_search_is_not_retried(self) -> None:
+        self.sdk_request.side_effect = RuntimeError("RESOURCE_EXHAUSTED")
+        self.assertEqual(await self.service.generate("質問", "selected-model"), (None, None, []))
+        self.sdk_request.assert_awaited_once()
+
+    async def test_invalid_status_numbers_do_not_break_error_handling(self) -> None:
+        for code in ("²", "9" * 5000):
+            with self.subTest(length=len(code)):
+                error = RuntimeError("架空の失敗")
+                error.status_code = code
+                self.sdk_request.reset_mock()
+                self.sdk_request.side_effect = error
+                result = await self.service.generate("質問", "selected-model", grounding=True)
+                self.assertIsNone(result[0])
+                self.sdk_request.assert_awaited_once()
+
     async def test_search_quota_on_both_models_answers_without_search(self) -> None:
         self.sdk_request.side_effect = [api_error(429, "架空の利用枠超過"), api_error(429, "架空の利用枠超過"),
                                         self.response]
