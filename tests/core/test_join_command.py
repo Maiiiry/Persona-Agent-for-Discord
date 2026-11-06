@@ -84,6 +84,48 @@ class JoinCommandTests(unittest.IsolatedAsyncioTestCase):
         self.channel.connect.assert_not_awaited()
         self.assertIn("既に接続しています", reply)
 
+    async def test_requester_moves_or_leaves_while_stopping_autonomous_session(self) -> None:
+        for destination in (self.make_channel(30), None):
+            with self.subTest(destination=destination):
+                self.interaction.user.voice = SimpleNamespace(channel=self.channel)
+                self.interaction.followup.send.reset_mock()
+                existing = self.make_voice_client(self.make_channel(40))
+                self.guild.voice_client = existing
+
+                async def stop(*args, **kwargs):
+                    self.interaction.user.voice = SimpleNamespace(channel=destination) if destination else None
+
+                self.autonomous.stop_session.side_effect = stop
+                await self.commands["join"](self.interaction)
+                existing.disconnect.assert_not_awaited()
+                self.channel.connect.assert_not_awaited()
+                if destination:
+                    destination.connect.assert_not_awaited()
+                self.assertIn("もう一度 /join", self.interaction.followup.send.await_args.args[0])
+
+    async def test_requester_moves_during_disconnect(self) -> None:
+        existing = self.make_voice_client(self.make_channel(40))
+        self.guild.voice_client = existing
+
+        async def disconnect(**kwargs):
+            self.interaction.user.voice.channel = self.make_channel(30)
+            self.guild.voice_client = None
+
+        existing.disconnect.side_effect = disconnect
+        await self.commands["join"](self.interaction)
+        self.channel.connect.assert_not_awaited()
+        self.assertIn("もう一度 /join", self.interaction.followup.send.await_args.args[0])
+
+    async def test_requester_moves_while_deferring_response(self) -> None:
+        async def defer():
+            self.interaction.user.voice.channel = self.make_channel(30)
+
+        self.interaction.response.defer.side_effect = defer
+        await self.commands["join"](self.interaction)
+        self.autonomous.stop_session.assert_not_awaited()
+        self.channel.connect.assert_not_awaited()
+        self.assertIn("もう一度 /join", self.interaction.followup.send.await_args.args[0])
+
     async def test_channel_name_mentions_cannot_notify_other_users_or_roles(self) -> None:
         self.channel.name = "@everyone @here <@&22> <@33>"
         for outcome in ("connected", "already_connected", "missing_permissions", "forbidden"):
