@@ -381,6 +381,7 @@ class Database:
     def initialize(self) -> None:
         """テーブル作成 → スキーマ移行 → 旧行の owner 移行 → 旧ファイル取り込み → profile.json 吸収。起動時に1回呼ぶ。"""
         with self._lock, self._conn:
+            # 接続のcontext managerはBEGINを発行しない（commit/rollbackだけを担う）。
             # DDL と PRAGMA は自動ではトランザクションを開始しないため明示する。
             # スキーマと user_version をまとめて確定し、途中失敗時はすべて元へ戻す。
             self._conn.execute("BEGIN IMMEDIATE")

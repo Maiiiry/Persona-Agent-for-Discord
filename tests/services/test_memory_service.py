@@ -740,6 +740,32 @@ class CompactionFailureCountTests(unittest.IsolatedAsyncioTestCase):
         await self.flush_once(RuntimeError("架空の一時エラー"))
         self.assertEqual(self.db.pending_fetch_entries("test-user"), [])
 
+    async def test_invalid_entry_ids_do_not_generate_or_clear_or_reset_failures(self) -> None:
+        await self.service.append_pending_log("test-user", "架空の質問", "架空の応答")
+        original = self.db.pending_fetch_entries("test-user")
+        self.service._compact_fail_count["test-user"] = MEMORY_COMPACT_MAX_FAILURES
+        self.service._compact_memory = AsyncMock(return_value=({}, {}))
+        for invalid_id in (None, "不正なID", 0, -1):
+            with self.subTest(invalid_id=invalid_id):
+                entries = [{**original[0], "id": invalid_id}]
+                with self.assertRaises(ValueError):
+                    await self.service._flush_user("test-user", entries)
+                self.service._compact_memory.assert_not_awaited()
+                self.assertEqual(self.db.pending_fetch_entries("test-user"), original)
+                self.assertEqual(self.service._compact_fail_count["test-user"], MEMORY_COMPACT_MAX_FAILURES)
+
+    async def test_invalid_clear_limit_does_not_reset_failure_count(self) -> None:
+        await self.service.append_pending_log("test-user", "架空の質問", "架空の応答")
+        original = self.db.pending_fetch_entries("test-user")
+        self.service._compact_fail_count["test-user"] = MEMORY_COMPACT_MAX_FAILURES
+        for max_entry_id in (0, -1):
+            with self.subTest(max_entry_id=max_entry_id), patch.object(self.db, "pending_clear_upto") as clear:
+                with self.assertRaises(ValueError):
+                    self.service._clear_compact_pending("test-user", max_entry_id)
+                clear.assert_not_called()
+        self.assertEqual(self.db.pending_fetch_entries("test-user"), original)
+        self.assertEqual(self.service._compact_fail_count["test-user"], MEMORY_COMPACT_MAX_FAILURES)
+
 
 if __name__ == "__main__":
     unittest.main()

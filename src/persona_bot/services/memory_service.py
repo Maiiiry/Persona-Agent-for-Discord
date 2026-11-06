@@ -409,10 +409,13 @@ class MemoryService:
         消えたり別のキーへ書き換えられたりして、元に戻せなくなる。要約は
         `store_document_summary` が件数の上限まで管理しているので、圧縮では触らない。
         """
-        pending_text = self._format_pending_entries(entries)
         # 圧縮対象に含まれた行の最大 id。削除範囲はここまでに限定する
         # （Gemini を待っている間に追記された新しい会話ログを道連れに消さないため）。
         max_entry_id = self._max_entry_id(entries)
+        if max_entry_id <= 0:
+            # 削除範囲を確定できないログへ生成を繰り返さず、原データと失敗回数を残す。
+            raise ValueError("記憶圧縮: 対象ログの有効な行IDを取得できませんでした。")
+        pending_text = self._format_pending_entries(entries)
 
         async with self.io_lock:
             profile_snapshot, wrapper = await run_in_thread(self._load_memory_snapshot, user_id)
@@ -459,6 +462,8 @@ class MemoryService:
 
     def _clear_compact_pending(self, user_id: str, max_entry_id: int) -> None:
         """ログ消去と失敗回数のリセットを、キャンセルで分断せずに完了する。"""
+        if max_entry_id <= 0:
+            raise ValueError("記憶圧縮: 対象ログの有効な行IDを取得できませんでした。")
         self._db.pending_clear_upto(user_id, max_entry_id)
         # 消去が成功した場合だけ戻す。新しいログへ過去の失敗回数を持ち越さない。
         self._compact_fail_count[user_id] = 0
@@ -519,8 +524,8 @@ class MemoryService:
         """圧縮対象の pending_log 行の最大 id を返す（削除範囲の上限に使う）。
 
         `pending_fetch_entries` は `SELECT *` なので各行に AUTOINCREMENT の id が入る。
-        万一 id を読めない行しか無い場合は 0 を返し、結果として何も削除されない
-        （消しすぎるより、次回の見回りでやり直す方が安全なため）。
+        万一 id を読めない行しか無い場合は 0 を返す。呼出元は生成・保存・削除を
+        進めずに読込エラーとして扱い、原データを保護する。
         """
         ids: list[int] = []
         for entry in entries:

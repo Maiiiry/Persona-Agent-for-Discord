@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from persona_bot.core.background import run_in_thread
+from persona_bot.core.background import TaskOwner, run_in_thread, spawn
 
 
 class RunInThreadTests(unittest.IsolatedAsyncioTestCase):
@@ -85,6 +85,38 @@ class RunInThreadTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_worker_error_does_not_replace_cancellation(self):
         await self.assert_canceled_after_worker(Mock(side_effect=OSError("架空の同期処理エラー")))
+
+
+class TaskOwnerShutdownTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rejected_spawn_is_tracked_until_cancellation_finishes(self):
+        owner = TaskOwner()
+        owner.stop_accepting()
+        body = Mock()
+
+        async def late_work():
+            body()
+
+        task = spawn(late_work(), label="停止後の架空の要求", owner=owner)
+        self.assertIn(task, owner._tasks)
+        await owner.shutdown()
+        self.assertTrue(task.cancelled())
+        self.assertEqual(owner._tasks, {})
+        body.assert_not_called()
+
+    async def test_timeout_preserves_protected_work_and_allows_later_drain(self):
+        owner = TaskOwner()
+        release = asyncio.Event()
+        task = spawn(release.wait(), label="架空の終了待機", owner=owner, _protected=True)
+        try:
+            with self.assertLogs("persona_bot.core.background", level="ERROR"):
+                with self.assertRaises(TimeoutError):
+                    await owner.shutdown(timeout=0.01)
+            self.assertFalse(task.done())
+            self.assertIn(task, owner._tasks)
+        finally:
+            release.set()
+            await owner.shutdown(timeout=1)
+        self.assertEqual(owner._tasks, {})
 
 
 if __name__ == "__main__":

@@ -7,7 +7,8 @@ from typing import Any, Awaitable, Callable
 
 import discord
 
-from persona_bot.core.background import TaskOwner, run_in_thread, spawn, task_scope, wait_for_task
+from persona_bot.core.background import ShutdownTimeoutError, TaskOwner, run_in_thread, spawn, task_scope, wait_for_task
+from persona_bot.config.constants import BACKGROUND_SHUTDOWN_TIMEOUT_SECONDS
 from persona_bot.services.genai_client import close_genai_client
 from persona_bot.utils.discord_helpers import REPLY_ALLOWED_MENTIONS
 
@@ -25,6 +26,7 @@ class PersonaClient(discord.Client):
         self._shutdown_callbacks: list[Callable[[], Awaitable[None]]] = []
         self.background_tasks = TaskOwner()
         self._close_task: asyncio.Task[Any] | None = None
+        self._service_stop_task: asyncio.Task[Any] | None = None
 
     async def start(self, token: str, *, reconnect: bool = True) -> None:
         # Discordが生成するコマンド・UI処理の子タスクにも所有者を引き継ぐ。
@@ -40,6 +42,11 @@ class PersonaClient(discord.Client):
 
     async def close(self) -> None:
         self.background_tasks.release_current()
+        if (self._close_task is not None and self._close_task.done()
+                and not self._close_task.cancelled()
+                and isinstance(self._close_task.exception(), ShutdownTimeoutError)):
+            # 期限超過でリソースを残した場合は、I/O復旧後の再終了を許す。
+            self._close_task = None
         if self._close_task is None:
             # 終了タスク自身を回収対象に入れると、自分自身の終了を待ってしまう。
             with task_scope(None):
@@ -51,13 +58,26 @@ class PersonaClient(discord.Client):
             await self._shutdown()
 
     async def _shutdown(self) -> None:
-        try:
-            await self.background_tasks.shutdown()
+        self.background_tasks.stop_accepting()
+
+        async def stop_services() -> None:
             for callback in self._shutdown_callbacks:
                 try:
                     await callback()
                 except (Exception, asyncio.CancelledError) as error:
                     logger.error(f'終了前のバックグラウンド処理の回収に失敗しました: {type(error).__name__}', exc_info=error)
+
+        # 新規受付停止後もサービスの後片付けは保護して実行する。
+        deadline = asyncio.get_running_loop().time() + BACKGROUND_SHUTDOWN_TIMEOUT_SECONDS
+        if self._service_stop_task is None:
+            self._service_stop_task = spawn(stop_services(), label="サービスの終了通知", _protected=True)
+        stopping = self._service_stop_task
+        await asyncio.wait({stopping}, timeout=BACKGROUND_SHUTDOWN_TIMEOUT_SECONDS)
+        # サービスが期限内に終わらない場合も、通常処理の中断と追跡は行う。
+        # 超過時は例外を返し、まだ使われているDiscord・Gemini・DBを閉じない。
+        await self.background_tasks.shutdown(timeout=max(0.0, deadline - asyncio.get_running_loop().time()))
+        try:
+            await stopping
         finally:
             try:
                 await super().close()
