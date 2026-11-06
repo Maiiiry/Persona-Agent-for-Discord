@@ -34,6 +34,7 @@ from tests.helpers.member_helpers import make_member, make_owner_client
 def make_interaction(*, admin: bool = True) -> SimpleNamespace:
     return SimpleNamespace(
         user=make_member(admin=admin),
+        guild=SimpleNamespace(id=1),
         client=make_owner_client(),
         response=SimpleNamespace(
             defer=AsyncMock(), edit_message=AsyncMock(), send_message=AsyncMock(), is_done=Mock(return_value=False),

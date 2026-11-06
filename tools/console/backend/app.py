@@ -18,10 +18,11 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from typing import Annotated
 from starlette.websockets import WebSocketDisconnect
 
 import asyncssh
-from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
@@ -259,7 +260,7 @@ async def get_logs(lines: int = 200) -> dict:
 
 
 @app.websocket("/api/logs/stream")
-async def stream_logs(websocket: WebSocket, lines: int = 100) -> None:
+async def stream_logs(websocket: WebSocket, lines: Annotated[int, Query(ge=1, le=rc.MAX_LOG_LINES)] = 100) -> None:
     """journalctl -f の出力を、1件ずつ WebSocket で画面へ流す。"""
     origin = websocket.headers.get("origin")
     if origin not in ALLOWED_ORIGINS:

@@ -372,6 +372,7 @@ class Database:
         # 引き継ぐ先の Discord ユーザーID。空文字なら引き継がず破棄する。
         self._legacy_owner_id = str(legacy_owner_id or "")
         self._lock = threading.Lock()
+        self._guild_settings_schema_version: int | None = None
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row  # 行に列名でアクセスできるようにする
@@ -388,12 +389,16 @@ class Database:
             for statement in _CREATE_TABLE_STATEMENTS:
                 self._conn.execute(statement)
             applied_versions = self._apply_migrations()
+            self._validate_guild_settings_schema(force=True)
         # 途中失敗で取り消された移行を、成功したように記録しない。
         for version in applied_versions:
             logger.info(f'データベース: スキーマをバージョン {version} へ移行しました。')
         self._migrate_legacy_profile_rows()
         self._import_legacy_files()
         self._absorb_profile_json()
+        with self._lock:
+            # 旧テーブルの回収で schema_version が変わった場合も、初期化中に検査を終える。
+            self._validate_guild_settings_schema()
 
     def close(self) -> None:
         """接続を閉じる（終了時に PersonaClient.close から呼ばれる）。
@@ -775,13 +780,24 @@ class Database:
         columns = ", ".join(["guild_id", *names])
         placeholders = ", ".join("?" for _ in range(len(names) + 1))
         with self._lock, self._conn:
-            columns_in_db = {row[1] for row in self._conn.execute("PRAGMA table_info(guild_settings)")}
-            if columns_in_db != {"guild_id", *names}:
-                raise ValueError("guild_settings の保存列と DB の列が一致しません。")
+            # 外部接続のスキーマ変更が検査と置換の間へ割り込まないようにする。
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._validate_guild_settings_schema()
             self._conn.execute(
                 f"INSERT OR REPLACE INTO guild_settings ({columns}) VALUES ({placeholders})",
                 (int(guild_id), *converted),
             )
+
+    def _validate_guild_settings_schema(self, *, force: bool = False) -> None:
+        """初期化時とスキーマ変更時だけ列を照合する。呼出元でロックを保持する。"""
+        schema_version = int(self._conn.execute("PRAGMA schema_version").fetchone()[0])
+        if not force and schema_version == self._guild_settings_schema_version:
+            return
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(guild_settings)")}
+        expected = {"guild_id", *(name for name, _, _, _ in GUILD_SETTINGS_FIELDS)}
+        if columns != expected:
+            raise ValueError("guild_settings の保存列と DB の列が一致しません。")
+        self._guild_settings_schema_version = schema_version
 
     # ---- anniversary_posts（記念日のお祝い投稿記録） --------------------------
 

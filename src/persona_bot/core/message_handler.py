@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import sys
 from typing import TYPE_CHECKING
 
 import discord
@@ -12,6 +13,7 @@ from persona_bot.services.affinity_service import extract_affinity_changes
 from persona_bot.core.app_state import BotState, GuildSettings, ResponseSettings
 from persona_bot.core.background import run_in_thread, spawn
 from persona_bot.core.chat_admission import ChatAdmission
+from persona_bot.core import message_admission, message_routing, message_response
 from persona_bot.core.agent_request import handle_agent_request
 from persona_bot.config.constants import (
     AGENT_ROUTER_HISTORY_LIMIT, GEMINI_RESPONSE_TIMEOUT_SECONDS,
@@ -80,20 +82,10 @@ class MessageHandler:
         self._agent_webhooks = AgentWebhooks()
 
     async def _screen_response(self, text, sources, *, log_label: str, screen_sources: bool = False):
-        """応答を検査し、送信用の出典を付ける。報告は出典も一緒に検査する。"""
-        if screen_sources:
-            text = self.ng_filter.mask_with_log(text, label=log_label)
-            sources = mask_grounding_sources(sources, self.ng_filter)
-            formatted = format_grounding_sources(sources)
-            _, accepted = await screen_bot_response_with_status(
-                text + formatted, None, self.moderator, log_label=log_label,
-            )
-            return text, sources, text + formatted, accepted
-        text, accepted = await screen_bot_response_with_status(
-            text, self.ng_filter, self.moderator, log_label=log_label,
+        return await message_response._screen_response(
+            self, text, sources, log_label=log_label, screen_sources=screen_sources,
+            runtime=sys.modules[__name__],
         )
-        reply = text + format_grounding_sources(sources, self.ng_filter) if accepted and sources else text
-        return text, sources, reply, accepted
 
     async def notify_violation(self, message: discord.Message, notice: str) -> None:
         """違反を1回記録し、ブロック状況に応じた警告をユーザーに返信する。
@@ -139,234 +131,17 @@ class MessageHandler:
         return False
 
     async def on_message(self, message: discord.Message) -> None:
-        if self.client.user is None:
-            return
-        if message.author == self.client.user or message.author.bot:
-            return
-        # ブロック中のユーザーは、活動の観測より前に黙って破棄する。後に置くと、無視している
-        # はずの発言で自発会話の沈黙タイマーが戻り、自律配信の話したいゲージや無応答での
-        # 退出まで左右されてしまう。
-        if self.blacklist.is_blocked(message.author.id):
-            return
-        # 返信も履歴取得もできないチャンネル種別は、NG判定やモデレーション（Gemini 呼び出し）に
-        # 進む前にここで打ち切る。後段に置くと、結局返信できない発言のために API を1回
-        # 無駄打ちし、違反警告の message.reply() も失敗してしまう。
-        channel = message.channel
-        if not is_supported_message_channel(channel):
-            return
-
-        is_dm = isinstance(message.channel, discord.DMChannel)
-        # DM はギルドに属さないため guild_id=None として「全DM共有」の設定スロットへ収束させる。
-        guild_id = message.guild.id if message.guild is not None else None
-        guild_settings = await self.state.get_guild_async(guild_id)
-        self.auto_topic.mark_activity(message.channel.id, guild_id)
-        # 自律行動の「話したいゲージ」も、ボット宛てでない発言を含めて観測する
-        # （このサーバーで会話が行われているかどうかがゲージの材料のため）。
-        # 引数の順番は auto_topic 側と同じ (channel_id, guild_id) に揃えてある。
-        self.autonomous.mark_activity(message.channel.id, guild_id)
-
-        # 通常のチャット経路が受け付ける条件（応答モードのゲート）。
-        # ルーティングでも同じ条件を使うため、判定を1か所にまとめて持ち回す。
-        accepts_normally = (
-            is_dm
-            or guild_settings.current_respond_mode != "mention"
-            or self.client.user in message.mentions
-        )
-        # 配信中のボイス/ステージチャンネル付属のチャットへの書き込みは「コメント」として
-        # 扱い、メンションが無くても拾う（傍観者は配信のチャットに気軽に書き込むもので、
-        # いちいちメンションを求めるのは配信の体裁に合わないため）。他のテキストチャンネル
-        # からの発言はコメントとして認めない（idea.md）ので、判定はチャンネル一致で行う。
-        is_autonomous_comment = self.autonomous.is_comment_channel(message.channel.id, guild_id)
-        if not accepts_normally and not is_autonomous_comment:
-            # 返信しない発言でも、ボットがいま接続しているボイス/ステージの付属チャットだけは
-            # ローカルのNGワード判定にかける（#172）。「返信する条件」と「NG判定の対象」を分け、
-            # ボットが居合わせている通話のチャットを見守る。AI判定は呼ばない（宛先でない
-            # 発言ごとに Gemini を呼ぶとコストが発散する）。他のチャンネルへは広げない。
-            if is_connected_voice_chat(message.guild, message.channel.id):
-                await self._reject_ng_input(
-                    message, clean_message_content(message, self.client.user), "NGワードが含まれています。",
-                )
-            return
-
-        question = clean_message_content(message, self.client.user)
-        if not question and not message.attachments:
-            return
-
-        if await self._reject_ng_input(message, question, "NGワードが含まれているため、メッセージを処理できません。"):
-            return
-
-        await self._process_accepted_message(
-            message, question, guild_settings, accepts_normally=accepts_normally,
-            is_autonomous_comment=is_autonomous_comment, image_objects=None,
-        )
+        await message_admission.on_message(self, message, runtime=sys.modules[__name__])
 
     async def _process_accepted_message(
         self, message: discord.Message, question: str, guild_settings: GuildSettings, *,
         accepts_normally: bool, is_autonomous_comment: bool, image_objects: list | None,
     ) -> None:
-        guild_id = message.guild.id if message.guild is not None else None
-        is_dm = isinstance(message.channel, discord.DMChannel)
-        # コメントの受付枠は画像のダウンロード・デコードとGeminiを呼ぶ前に確保する。
-        # 見送る分も活動観測は上の mark_activity で済ませている。
-        claimed_comment_session = None
-        if is_autonomous_comment and self.autonomous.is_comment_channel(message.channel.id, guild_id):
-            claimed_comment_session = self.autonomous.claim_comment_slot(message.channel.id, guild_id)
-            if claimed_comment_session is None and self.autonomous.is_comment_channel(message.channel.id, guild_id):
-                return
-
-        normal_slot_acquired = False
-        if claimed_comment_session is None:
-            # 入口ではコメントでも、受付前に配信が終わった場合は通常の委任判定を使う。
-            is_autonomous_comment = False
-            if not accepts_normally:
-                return
-            normal_slot_acquired = await self._try_acquire_chat_slot(message, guild_id)
-            if not normal_slot_acquired:
-                return
-        owns_images = False
-        try:
-            if is_autonomous_comment and not question and image_objects is None:
-                image_objects = await load_image_attachments(message.attachments)
-                owns_images = True
-                if not image_objects:
-                    # 画像確認中に配信が終わったら、通常の文書受付・画像失敗案内へ進める。
-                    if not accepts_normally or self.autonomous.is_comment_channel(message.channel.id, guild_id):
-                        return
-            # 安全判定・記憶カテゴリ・リマインダー依頼を1回のAPI呼び出しで取得する。
-            # memory_categoryは通常チャットの記憶参照へ、reminder_requestは添付の振り分け後の登録へ渡す。
-            memory_category = "none"
-            reminder_request: dict[str, str] | None = None
-            agent_plan: AgentPlan | None = None
-            if question:
-                if not is_autonomous_comment and requests_subagent(question):
-                    # サブエージェントの使用が明記された発言だけ、同じ1回の判定に委任の判定を足す（#170）。
-                    # 「さっきの件」のような依頼を子へ渡せる形に整理させるため、直近の会話も渡す。
-                    router_history = await fetch_channel_history_text(
-                        message.channel,
-                        guild_settings.channel_reset_points.get(message.channel.id),
-                        self.client.user,
-                        AGENT_ROUTER_HISTORY_LIMIT,
-                        is_blocked=self.blacklist.is_blocked,
-                    )
-                    is_safe, _reason, memory_category, reminder_request, agent_plan = (
-                        await self.moderator.check_route_and_plan(question, router_history)
-                    )
-                else:
-                    is_safe, _reason, memory_category, reminder_request = await self.moderator.check_and_route(question)
-                if not is_safe:
-                    await self.notify_violation(message, "不適切な内容が検出されたため、メッセージを処理できません。")
-                    return
-
-            self.state.touch()
-
-            # モデレーション後の配信状態を取り直し、通常チャットの副作用より先に振り分ける。
-            if self.autonomous.is_comment_channel(message.channel.id, guild_id):
-                comment_session = guild_settings.autonomous_session
-                response_settings = guild_settings.snapshot_response()
-                response_text = await self.autonomous.handle_comment(
-                    message, question, guild_settings, claimed_session=claimed_comment_session,
-                    response_settings=response_settings, image_objects=image_objects,
-                )
-                if response_text and self.autonomous.can_speak_session(message.guild, guild_settings, comment_session):
-                    await play_tts_response(
-                        message, response_text, response_settings.prompt_file,
-                        is_valid=lambda: self.autonomous.can_speak_session(message.guild, guild_settings, comment_session),
-                    )
-                return
-            if not accepts_normally:
-                logger.info('自律行動: 配信の終了と入れ違いに届いた発言のため、応答しません。')
-                return
-
-            # 配信終了後に通常会話へ移る場合も、通常の受付制限を通す。
-            if not normal_slot_acquired:
-                normal_slot_acquired = await self._try_acquire_chat_slot(message, guild_id)
-                if not normal_slot_acquired:
-                    return
-
-            # 配信の再確認と通常枠の確保が済んだ発言だけ、話題提供の監視へ登録する。
-            # 入力判定中に配信が終わった場合も対象にし、配信中のコメントとDMは登録しない。
-            if not is_dm:
-                self.auto_topic.watch_channel(message.channel.id, guild_id)
-
-            document_attachments = [
-                attachment
-                for attachment in message.attachments
-                if is_supported_document_attachment(attachment)
-            ]
-            unsupported_attachments = [
-                attachment
-                for attachment in message.attachments
-                if not is_supported_document_attachment(attachment) and not attachment_is_image(attachment)
-            ]
-
-            if unsupported_attachments:
-                await message.reply(
-                    f"未対応の添付ファイルが含まれています。{describe_supported_attachments()}に対応しています。",
-                    allowed_mentions=REPLY_ALLOWED_MENTIONS,
-                )
-                return
-
-            if document_attachments:
-                for attachment in document_attachments:
-                    if attachment.size > MAX_DOCUMENT_SIZE_BYTES:
-                        await message.reply(
-                            f"ファイルサイズが上限({MAX_DOCUMENT_SIZE_BYTES // (1024 * 1024)}MB)を超えています。",
-                            allowed_mentions=REPLY_ALLOWED_MENTIONS,
-                        )
-                        return
-
-                # 未処理件数の上限で受け付けなかった文書には、受付完了を伝えない（#202）。
-                if await self.documents.enqueue_from_message(message, question, document_attachments) is None:
-                    await message.reply(DOCUMENT_QUEUE_FULL_NOTICE, allowed_mentions=REPLY_ALLOWED_MENTIONS)
-                    return
-                await message.reply("受付が完了しました。順番に処理しています…", allowed_mentions=REPLY_ALLOWED_MENTIONS)
-                return
-
-            # --- 会話統計の記録（ボットへの発言のみを集計。失敗してもチャット本体は止めない） ---
-            spawn(
-                self.stats.record(
-                    str(message.author.id),
-                    message.author.display_name,
-                    question,
-                    message.created_at,
-                ),
-                label="会話統計の記録",
-            )
-
-            # --- リマインダー依頼（モデレーションと同じ判定で抽出済み） ---
-            # 添付ファイルの処理より後に置く: 文書を添えた依頼では文書処理を優先する。
-            # 登録できたら確認だけを返し、通常のチャット応答は行わない
-            # （同じ発言に対して確認とチャット返信の二重投稿になるのを避けるため）。
-            # 日時が過去・解釈不能などで登録を見送った場合は None が返るので、
-            # 依頼ではない発言を誤って拾ったものとして通常の会話へ流す。
-            if reminder_request is not None:
-                confirmation = await self.reminders.create_from_request(message, reminder_request)
-                if confirmation:
-                    confirmation = self.ng_filter.mask_with_log(confirmation, label="リマインダー登録確認")
-                    await message.reply(confirmation, allowed_mentions=REPLY_ALLOWED_MENTIONS)
-                    return
-
-            response_settings = guild_settings.snapshot_response()
-            # テキストの返信は読み上げない（#268）。/join のボイスチャンネルでは Gemini Live が
-            # 声で会話するため、テキストの返信まで読み上げると声が重なる。読み上げ（TTS）は
-            # 自律行動の配信（上の配信コメントへの応答）だけで使う。
-            if agent_plan is not None and agent_plan.delegate:
-                await self._handle_agent_request(
-                    message, question, memory_category, agent_plan, response_settings,
-                    image_objects=image_objects,
-                )
-            else:
-                # サブエージェントを求められたが不要と判断した場合は、人格役がその旨を一言添えて直接答える。
-                await self.handle_chat_message(
-                    message, question, memory_category, response_settings=response_settings,
-                    image_objects=image_objects,
-                    delegation_section=build_agent_declined_section() if agent_plan is not None else "",
-                )
-        finally:
-            if normal_slot_acquired:
-                self._chat_admission.release(guild_id)
-            if owns_images:
-                close_image_attachments(image_objects)
+        await message_routing._process_accepted_message(
+            self, message, question, guild_settings, accepts_normally=accepts_normally,
+            is_autonomous_comment=is_autonomous_comment, image_objects=image_objects,
+            runtime=sys.modules[__name__],
+        )
 
     async def _handle_agent_request(
         self, message: discord.Message, question: str, memory_category: str, plan: AgentPlan,
@@ -378,165 +153,25 @@ class MessageHandler:
         )
 
     async def handle_chat_message(
-        self,
-        message: discord.Message,
-        question: str,
-        memory_category: str = "none",
-        *,
-        response_settings: ResponseSettings | None = None,
-        delegation_section: str = "",
-        delegated_sources: list[dict[str, str]] | None = None,
-        image_objects: list | None = None,
+        self, message: discord.Message, question: str, memory_category: str = "none", *,
+        response_settings: ResponseSettings | None = None, delegation_section: str = "",
+        delegated_sources: list[dict[str, str]] | None = None, image_objects: list | None = None,
     ) -> str | None:
-        """人格役として返信し、送った本文を返す。
-
-        Args:
-            delegation_section: サブエージェントの報告・委任しなかった旨の差し込み（#170）。
-            delegated_sources: サブエージェントが検索で参照した出典。渡したときは人格役は検索せず
-                （報告の言い直しなので）、この出典を返信に添える。
-            image_objects: 読込済み画像の借用。配信終了後の通常経路でも再読込せず、呼出元が閉じる。
-        """
-        guild_id = message.guild.id if message.guild is not None else None
-        guild_settings = await self.state.get_guild_async(guild_id)
-        # typing() の開始も待機を伴うため、その前に今回の値を確定する。
-        if response_settings is None:
-            response_settings = guild_settings.snapshot_response()
-        async with message.channel.typing():
-            user_id = str(message.author.id)
-            owns_images = image_objects is None
-            if owns_images:
-                image_objects = await load_image_attachments(message.attachments)
-            try:
-                if not question:
-                    if not image_objects:
-                        # 画像だけの発言で、どの画像も読み込めなかった。質問も画像も無いまま
-                        # Gemini を呼ぶと、見えていない画像への反応を作り話で返してしまうため断る。
-                        await message.reply(
-                            "画像を読み込めませんでした。"
-                            f"{describe_supported_attachments(documents=False)}の画像か確認して、もう一度送ってください。",
-                            allowed_mentions=REPLY_ALLOWED_MENTIONS,
-                        )
-                        return None
-                    question = IMAGE_ONLY_QUESTION
-
-                history_text = await fetch_channel_history_text(
-                    message.channel,
-                    guild_settings.channel_reset_points.get(message.channel.id),
-                    self.client.user,
-                    HISTORY_LIMIT,
-                    is_blocked=self.blacklist.is_blocked,
-                )
-                # 記憶カテゴリは on_message のモデレーション統合判定で既に決まっている
-                # （追加の Gemini 呼び出しはしない）。ユーザー別の記憶スペースを読み込む。
-                memory_context, document_context = await self.memory.build_contexts(memory_category, user_id)
-
-                try:
-                    prompt = await load_persona_template(response_settings.prompt_file)
-                except FileNotFoundError:
-                    logger.warning("プロンプトファイルが見つかりません。", exc_info=True)
-                    await message.reply(
-                        "会話設定のファイルが見つかりません。管理者に設定の確認を依頼してください。",
-                        allowed_mentions=REPLY_ALLOWED_MENTIONS,
-                    )
-                    return None
-
-                full_prompt = build_full_prompt(
-                    prompt,
-                    build_memory_sections(memory_category, memory_context, document_context),
-                    history_text,
-                    question,
-                    affinity_prompt=self.affinity.build_dynamic_prompt(str(message.author.id)),
-                    delegation_section=delegation_section,
-                )
-                delegated = delegated_sources is not None
-                response_text, usage_info, grounding_sources, generated_model = await self.gemini.generate_with_metadata(
-                    full_prompt,
-                    response_settings.model_name,
-                    image_objects,
-                    timeout=GEMINI_RESPONSE_TIMEOUT_SECONDS,
-                    grounding=response_settings.grounding_enabled and not delegated,
-                )
-
-                if response_text is None:
-                    await message.reply(
-                        "エラーが発生しました。（Gemini APIの呼び出しに失敗、または非対応の画像形式です）",
-                        allowed_mentions=REPLY_ALLOWED_MENTIONS,
-                    )
-                    return None
-                if delegated:
-                    grounding_sources = delegated_sources
-
-                self.usage.log_snapshot(
-                    "サブエージェント経由" if delegated else "直接会話",
-                    question, f"画像添付: {len(image_objects)}枚", full_prompt, response_text, usage_info,
-                )
-
-                # タグの抽出だけ先に行い、親密度の更新はモデレーション通過・送信成功後に行う。
-                response_text, emotion_changes = extract_affinity_changes(response_text)
-
-                # タグを除去した結果、本文が空になった場合は空メッセージ送信を防ぐ
-                # （モデルが感情タグだけを返したケース）。
-                if not response_text.strip():
-                    logger.info('応答本文が空です（感情タグのみ、または空応答）。')
-                    await message.reply(
-                        "申し訳ありません、うまく応答を生成できませんでした。もう一度お試しください。",
-                        allowed_mentions=REPLY_ALLOWED_MENTIONS,
-                    )
-                    return None
-
-                # 参考リンクは送信用テキストにのみ追記する
-                # （長期記憶には URL の列挙はノイズになるため含めない）。
-                response_text, _, reply_text, accepted = await self._screen_response(
-                    response_text, grounding_sources, log_label="Bot応答",
-                )
-
-                # 送信の失敗は呼出元へ伝える。
-                sent = await send_long_reply(message, reply_text, suppress_embeds=bool(accepted and grounding_sources))
-                # ★ ここから先は送信済みの返信に付随する処理。どれが失敗しても、送った本文は
-                # 呼出元へ返す（#157）。再生成・再送はしない（二重返信になるため）。
-                if accepted and emotion_changes is not None:
-                    try:
-                        v_change, a_change = emotion_changes
-                        self.affinity.update_emotion(user_id, v_change, a_change)
-                        spawn(self.affinity.save_background(user_id), label="親密度の保存")
-                    except Exception:
-                        logger.warning("親密度の更新に失敗しました（返信は送信済み）。", exc_info=True)
-                if accepted:
-                    self._track_reply_for_feedback(sent, user_id, response_settings, generated_model)
-                if accepted and await self._remember_reply(user_id, question, response_text):
-                    spawn(self.memory.flush_if_needed(), label="記憶圧縮（チャット便乗）")
-                return response_text
-            finally:
-                if owns_images:
-                    close_image_attachments(image_objects)
+        """人格役として返信する。読込済み画像は借用し、呼出元が回収する。"""
+        return await message_response.handle_chat_message(
+            self, message, question, memory_category, response_settings=response_settings,
+            delegation_section=delegation_section, delegated_sources=delegated_sources,
+            image_objects=image_objects, runtime=sys.modules[__name__],
+        )
 
     def _track_reply_for_feedback(
         self, sent: discord.Message, user_id: str, response_settings: ResponseSettings, generated_model: str,
     ) -> None:
-        """送った返信を 👍👎 の評価対象として登録する（リアクション付与は裏で走る）。
-
-        実際の生成モデルと今回のペルソナを渡し、待機中の設定変更を混ぜない。登録の失敗は
-        評価を取りこぼすだけなので、ログに残して記憶へ進む。
-        """
-        try:
-            self.feedback.track_reply(
-                sent,
-                target_user_id=user_id,
-                model_name=generated_model,
-                prompt_file=response_settings.prompt_file,
-            )
-        except Exception as error:
-            logger.error(f'評価対象の登録に失敗しました（返信は送信済み）: {type(error).__name__}', exc_info=error)
+        message_response._track_reply_for_feedback(
+            self, sent, user_id, response_settings, generated_model, runtime=sys.modules[__name__],
+        )
 
     async def _remember_reply(self, user_id: str, question: str, response_text: str) -> bool:
-        """会話を記憶圧縮前の一時ログへ追記し、成功したかを返す。
-
-        失敗しても返信は送信済みなので、例外を外へ出さずにログへ残す（成功扱いにはしない。
-        記憶圧縮も起動しない）。キャンセルは Exception に含まれないため従来どおり伝わる。
-        """
-        try:
-            await self.memory.append_pending_log(user_id, question, response_text)
-        except Exception as error:
-            logger.error(f'会話記憶: 返信は送信済みですが、記憶への追記に失敗しました（user_id=<ID>）: {type(error).__name__}', exc_info=error)
-            return False
-        return True
+        return await message_response._remember_reply(
+            self, user_id, question, response_text, runtime=sys.modules[__name__],
+        )

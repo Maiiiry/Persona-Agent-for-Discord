@@ -53,6 +53,34 @@ class DatabaseInitializationTests(unittest.TestCase):
             self.db.guild_settings_save(1, **values)
         self.assertEqual(self.db._conn.execute("SELECT future_setting FROM guild_settings WHERE guild_id = 1").fetchone()[0], 42)
 
+    def test_repeated_settings_saves_reuse_column_validation(self) -> None:
+        self.db.initialize()
+        values = {name: getattr(BotState().get_guild(1), attribute) for name, attribute, _, _ in GUILD_SETTINGS_FIELDS}
+        statements = []
+        self.db._conn.set_trace_callback(statements.append)
+        for guild_id in (1, 2, 1):
+            self.db.guild_settings_save(guild_id, **values)
+        self.assertFalse(any("table_info(guild_settings)" in sql for sql in statements), statements)
+        self.assertEqual(len([sql for sql in statements if "PRAGMA schema_version" in sql]), 3)
+
+    def test_unknown_settings_column_rejects_initialization(self) -> None:
+        self.db.initialize()
+        with self.db._conn:
+            self.db._conn.execute("ALTER TABLE guild_settings ADD COLUMN future_setting INTEGER DEFAULT 42")
+        with self.assertRaises(ValueError):
+            self.db.initialize()
+        self.assertFalse(self.db._conn.in_transaction)
+
+    def test_external_settings_schema_change_invalidates_cached_validation(self) -> None:
+        self.db.initialize()
+        values = {name: getattr(BotState().get_guild(1), attribute) for name, attribute, _, _ in GUILD_SETTINGS_FIELDS}
+        self.db.guild_settings_save(1, **values)
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute("ALTER TABLE guild_settings ADD COLUMN future_setting INTEGER DEFAULT 42")
+        with self.assertRaises(ValueError):
+            self.db.guild_settings_save(1, **values)
+        self.assertEqual(self.db._conn.execute("SELECT future_setting FROM guild_settings WHERE guild_id = 1").fetchone()[0], 42)
+
     def test_repeated_initialization_preserves_user_data(self) -> None:
         self.db.initialize()
         self.db.profile_merge("test-user", {"趣味": "架空の工作"})
@@ -79,7 +107,8 @@ class DatabaseInitializationTests(unittest.TestCase):
 
     def prepare_version_five(self) -> None:
         # 繰り返し列を追加する前のDBに、架空の既存データを用意する。
-        with patch.object(database, "SCHEMA_VERSION", 5):
+        # 旧版の検証対象を作る間だけ、現行版の列照合は行わない。
+        with patch.object(database, "SCHEMA_VERSION", 5), patch.object(self.db, "_validate_guild_settings_schema"):
             self.db.initialize()
         self.db.profile_merge("test-user", {"趣味": "架空の工作"})
         self.db.pending_append("test-user", "2026-01-01", "架空の質問", "架空の回答")
@@ -566,7 +595,7 @@ class ReminderUserIndexTests(unittest.TestCase):
         self.assertEqual(self.db.reminder_count_pending(target), 4)
 
     def test_version_nine_database_gains_index_and_keeps_reminders(self) -> None:
-        with patch.object(database, "SCHEMA_VERSION", 9):
+        with patch.object(database, "SCHEMA_VERSION", 9), patch.object(self.db, "_validate_guild_settings_schema"):
             self.db.initialize()
         reminder_id = self.add("test-user", "2026-01-02T00:00:00+00:00")
         self.assertNotIn(self.INDEX, self.reminder_indexes())
@@ -590,7 +619,7 @@ class FeedbackPruneIndexTests(unittest.TestCase):
         self.path = Path(directory.name) / "bot.db"
         self.db = Database(self.path)
         self.addCleanup(lambda: self.db.close())
-        with patch.object(database, "SCHEMA_VERSION", 11):
+        with patch.object(database, "SCHEMA_VERSION", 11), patch.object(self.db, "_validate_guild_settings_schema"):
             self.db.initialize()
         # 日時とIDの大小を逆にし、同じ日時・同じ返信への複数票も用意する。
         for message_id, user_id, day in ((40, "user-a", 1), (10, "user-a", 3),
@@ -649,7 +678,7 @@ class FeedbackPruneIndexTests(unittest.TestCase):
                         self.db._conn.backup(connection)
                     candidate = Database(candidate_path)
                     self.addCleanup(candidate.close)
-                    with patch.object(database, "SCHEMA_VERSION", version):
+                    with patch.object(database, "SCHEMA_VERSION", version), patch.object(candidate, "_validate_guild_settings_schema"):
                         candidate.initialize()
                     candidate.feedback_prune(max_keep)
                     rows = [tuple(row) for row in candidate._conn.execute(
@@ -673,7 +702,7 @@ class PendingLogIndexTests(unittest.TestCase):
         self.path = Path(directory.name) / "bot.db"
         self.db = Database(self.path)
         self.addCleanup(lambda: self.db.close())
-        with patch.object(database, "SCHEMA_VERSION", 12):
+        with patch.object(database, "SCHEMA_VERSION", 12), patch.object(self.db, "_validate_guild_settings_schema"):
             self.db.initialize()
         # 利用者を交互に並べ、追記順（id）と利用者ごとの順が食い違う状態にする。
         for index in range(6):

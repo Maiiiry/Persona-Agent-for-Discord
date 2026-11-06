@@ -276,3 +276,32 @@ class SshCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.session.command_state_unknown)
         self.process.close.assert_called_once()
         self.process.wait_closed.assert_awaited_once()
+        self.assertFalse(self.session.history[-1].ok)
+
+    async def test_cancellation_with_unexpected_completion_error_records_unknown_state(self):
+        async def finish(**kwargs):
+            self.started.set()
+            await self.release.wait()
+            raise ValueError("架空の内部失敗")
+
+        self.process.wait.side_effect = finish
+        task = self.start()
+        await self.started.wait()
+        task.cancel()
+        await self.waiting.wait()
+        self.release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(self.session.command_state_unknown)
+        self.assertFalse(self.session.history[-1].ok)
+        self.assertIsNone(self.session.history[-1].exit_status)
+        self.process.wait_closed.assert_awaited_once()
+
+    async def test_internally_canceled_completion_records_history(self):
+        self.process.wait.side_effect = asyncio.CancelledError()
+        with self.assertRaises(asyncio.CancelledError):
+            await self.start()
+        self.assertTrue(self.session.command_state_unknown)
+        self.assertFalse(self.session.history[-1].ok)
+        self.assertIsNone(self.session.history[-1].exit_status)
+        self.process.wait_closed.assert_awaited_once()

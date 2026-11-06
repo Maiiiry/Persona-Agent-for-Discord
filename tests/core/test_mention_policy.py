@@ -57,7 +57,7 @@ class MentionPolicyTests(unittest.IsolatedAsyncioTestCase):
 class DirectSendPolicyTests(unittest.TestCase):
     def test_handler_replies_and_dynamic_public_command_sends_declare_mentions(self) -> None:
         """helperを経由しない送信のうち、入力を載せうる経路の指定漏れを検出する。"""
-        for filename in ("message_handler.py", "commands.py"):
+        for filename in ("message_handler.py", "message_admission.py", "message_routing.py", "message_response.py", "commands.py"):
             path = ROOT / "src/persona_bot/core" / filename
             tree = ast.parse(path.read_text(encoding="utf-8-sig"))
             for node in ast.walk(tree):

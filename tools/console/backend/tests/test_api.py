@@ -497,14 +497,14 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNone(data["resources"]["load"])
                 self.assertNotIn(b"private detail", body)
 
-    async def websocket(self, *, origin="http://127.0.0.1:5173", host="127.0.0.1"):
+    async def websocket(self, *, origin="http://127.0.0.1:5173", host="127.0.0.1", lines="1"):
         incoming, outgoing = asyncio.Queue(), asyncio.Queue()
         headers = [(b"host", host.encode())]
         if origin is not None:
             headers.append((b"origin", origin.encode()))
         scope = {"type": "websocket", "asgi": {"version": "3.0", "spec_version": "2.4"},
                  "scheme": "ws", "path": "/api/logs/stream", "raw_path": b"/api/logs/stream",
-                 "root_path": "", "query_string": b"lines=1", "headers": headers,
+                 "root_path": "", "query_string": f"lines={lines}".encode(), "headers": headers,
                  "client": ("127.0.0.1", 1234), "server": ("127.0.0.1", app.PORT), "subprotocols": []}
         await incoming.put({"type": "websocket.connect"})
         task = asyncio.create_task(app.app(scope, incoming.get, outgoing.put))
@@ -529,6 +529,24 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                     messages.append(outgoing.get_nowait())
                 self.assertFalse(any(message["type"] == "websocket.accept" for message in messages))
         self.assertFalse(self.bot.subscribers)
+
+    async def test_websocket_log_line_range_rejects_before_opening_remote_process(self):
+        with mock.patch.object(self.session, "open_process", new_callable=mock.AsyncMock) as opening:
+            for lines in ("0", "-1", str(rc.MAX_LOG_LINES + 1), "not-a-number"):
+                with self.subTest(lines=lines):
+                    task, _, outgoing = await self.websocket(lines=lines)
+                    await asyncio.wait_for(task, 3)
+                    message = outgoing.get_nowait()
+                    self.assertEqual(message["type"], "websocket.close")
+                    self.assertEqual(message["code"], 1008)
+            opening.assert_not_awaited()
+
+    async def test_websocket_log_line_upper_boundary_is_accepted(self):
+        task, incoming, outgoing = await self.websocket(lines=str(rc.MAX_LOG_LINES))
+        self.assertEqual((await asyncio.wait_for(outgoing.get(), 3))["type"], "websocket.accept")
+        while (await asyncio.wait_for(outgoing.get(), 3))["type"] != "websocket.send":
+            pass
+        await self.close_websocket(task, incoming)
 
     async def test_websocket_stream_closes_remote_channel_when_client_leaves(self):
         task, incoming, outgoing = await self.websocket()

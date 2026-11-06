@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 import discord
 from persona_bot.config import constants
+from persona_bot.audio import voice as tts_voice
 from persona_bot.services import voice_conversation
 from persona_bot.services.content_moderator import VERDICT_SAFE, VERDICT_UNKNOWN, VERDICT_UNSAFE
 from persona_bot.services.live_session import CLOSED_QUOTA, LiveOptions, LiveUnavailableError
@@ -388,6 +389,68 @@ class ResponseTests(ConversationTestBase):
 
     async def test_aborted_player_is_joined_after_stop_clears_reference(self):
         await self.assert_replacement_waits(withdraw=False, abort_before=True)
+
+    async def test_live_waits_for_tts_cleanup_on_the_same_connection(self):
+        await self.assert_live_waits_for_tts(withdraw=False)
+
+    async def test_live_withdrawal_while_waiting_does_not_stop_tts(self):
+        await self.assert_live_waits_for_tts(withdraw=True)
+
+    async def test_late_live_withdrawal_does_not_stop_replacement_tts(self):
+        await self.complete_utterance()
+        await self.respond(complete=False)
+        started = asyncio.Event()
+        callbacks = []
+
+        def play(source, *, after):
+            callbacks.append(after)
+            started.set()
+
+        self.voice_client.play.side_effect = play
+        tts_task = asyncio.create_task(tts_voice._play_pcm(self.voice_client, bytes(16)))
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            self.voice_client.stop.reset_mock()
+            self.conversation.withdraw(USER_B)
+            self.voice_client.stop.assert_not_called()
+            callbacks[0](None)
+            await asyncio.wait_for(tts_task, 2)
+        finally:
+            if callbacks:
+                callbacks[0](None)
+            await asyncio.gather(tts_task, return_exceptions=True)
+
+    async def assert_live_waits_for_tts(self, *, withdraw):
+        await self.complete_utterance()
+        started = asyncio.Event()
+        callbacks = []
+
+        def play(source, *, after):
+            callbacks.append(after)
+            started.set()
+
+        self.voice_client.play.side_effect = play
+        tts_task = asyncio.create_task(tts_voice._play_pcm(self.voice_client, bytes(16)))
+        live_task = None
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            tts_source = self.voice_client.play.call_args.args[0]
+            live_task = asyncio.create_task(self.respond(complete=False))
+            await asyncio.sleep(0)
+            self.assertFalse(live_task.done())
+            self.voice_client.play.assert_called_once()
+            if withdraw:
+                self.conversation.withdraw(USER_B)
+            self.voice_client.stop.assert_not_called()
+            self.assertFalse(tts_source.stream.closed)
+            callbacks[0](None)
+            await asyncio.wait_for(asyncio.gather(tts_task, live_task), 2)
+            self.assertTrue(tts_source.stream.closed)
+            self.assertEqual(self.voice_client.play.call_count, 1 if withdraw else 2)
+        finally:
+            if callbacks:
+                callbacks[0](None)
+            await asyncio.gather(*(task for task in (tts_task, live_task) if task is not None), return_exceptions=True)
 
     async def assert_replacement_waits(self, *, withdraw, abort_before=False):
         await self.complete_utterance()
@@ -961,7 +1024,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             entered.set()
             await resume.wait()
 
-        voice_client = SimpleNamespace(disconnect=AsyncMock(), is_connected=lambda: True)
+        voice_client = Mock(spec=discord.VoiceClient, disconnect=AsyncMock(), is_connected=Mock(return_value=True))
         guild = SimpleNamespace(id=1, me=None, voice_client=voice_client)
         old = SimpleNamespace(
             stop=AsyncMock(side_effect=stop), voice_client=voice_client, guild=guild, _notify=AsyncMock(),

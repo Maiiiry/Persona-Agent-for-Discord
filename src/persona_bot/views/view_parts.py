@@ -11,7 +11,7 @@ from discord import ui
 from persona_bot.config.constants import DISCORD_SELECT_LABEL_MAX_LENGTH, VIEW_TIMEOUT_SECONDS
 from persona_bot.core.background import TaskOwner, _current_owner
 from persona_bot.core.app_state import GuildSettings
-from persona_bot.utils.discord_helpers import reject_blocked_interaction, split_message
+from persona_bot.utils.discord_helpers import is_administrator, is_current_administrator, reject_blocked_interaction, split_message
 
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,39 @@ async def authorize_panel_operation(view, interaction, *, allowed, recheck, noti
     begin_panel_operation(view, interaction)
     await interaction.response.defer(ephemeral=True)
     return await confirm_panel_permission(interaction, await recheck(interaction), notice=notice)
+
+
+def _is_personal_settings_operation(view, interaction, allow_dm: bool) -> bool:
+    return (
+        allow_dm and getattr(interaction, "guild", None) is None
+        and getattr(getattr(view, "guild_settings", None), "guild_id", None) is None
+    )
+
+
+async def confirm_administrator_operation(view, interaction, *, allow_dm: bool = False, notice: str) -> bool:
+    """長い待機の後に管理者を再取得し、失効した操作・設定を保存させない。"""
+    allowed = _is_personal_settings_operation(view, interaction, allow_dm) or (
+        getattr(interaction, "guild", None) is not None and await is_current_administrator(interaction)
+    )
+    if not await confirm_panel_permission(interaction, allowed, notice=notice):
+        return False
+    return panel_operation_is_current(view, interaction) and await view.ensure_settings_current(interaction)
+
+
+async def authorize_administrator_operation(
+    view, interaction, *, allow_dm: bool = False, notice: str, refresh: bool = True,
+) -> bool:
+    """写しの権限で即時拒否し、保留後の再確認を共通化する。DM許可は明示する。"""
+    allowed = _is_personal_settings_operation(view, interaction, allow_dm) or (
+        getattr(interaction, "guild", None) is not None and is_administrator(getattr(interaction, "user", None))
+    )
+
+    async def recheck(_interaction):
+        return not refresh or _is_personal_settings_operation(view, interaction, allow_dm) or await is_current_administrator(interaction)
+
+    if not await authorize_panel_operation(view, interaction, allowed=allowed, recheck=recheck, notice=notice):
+        return False
+    return panel_operation_is_current(view, interaction) and await view.ensure_settings_current(interaction)
 
 
 async def confirm_panel_permission(interaction, allowed: bool, *, notice: str, followup: bool = False) -> bool:
