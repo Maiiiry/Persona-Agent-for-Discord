@@ -18,6 +18,7 @@ from persona_bot.views.auto_topic_view import AutoTopicConfirmButton, AutoTopicV
 from persona_bot.views.autonomous_channel_view import AutonomousChannelConfirmButton, AutonomousChannelView
 from persona_bot.views.functions_view import FunctionsView, GroundingToggleButton
 from persona_bot.views.settings_view import ConfirmButton, SettingsView
+from tests.helpers.member_helpers import make_member
 
 
 class SettingsRejoinTests(unittest.IsolatedAsyncioTestCase):
@@ -54,7 +55,10 @@ class SettingsRejoinTests(unittest.IsolatedAsyncioTestCase):
             response.is_done.return_value = True
 
         response.defer = AsyncMock(side_effect=defer)
-        return SimpleNamespace(response=response, edit_original_response=AsyncMock(), extras={})
+        return SimpleNamespace(
+            response=response, edit_original_response=AsyncMock(), extras={},
+            guild=SimpleNamespace(id=1), user=make_member(admin=True),
+        )
 
     async def rejoin(self):
         self.state.forget_guild(1)
@@ -103,7 +107,7 @@ class SettingsRejoinTests(unittest.IsolatedAsyncioTestCase):
                     await self.rejoin()
 
                 interaction.response.defer.side_effect = rejoin_on_defer
-                with patch("persona_bot.views.autonomous_channel_view.is_current_administrator",
+                with patch("persona_bot.views.view_parts.is_current_administrator",
                            new=AsyncMock(return_value=True)):
                     await button.callback(interaction)
                 self.assertIn("開き直してください", interaction.edit_original_response.call_args.kwargs["content"])

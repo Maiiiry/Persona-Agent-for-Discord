@@ -4,11 +4,13 @@ import asyncio
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import io
+import gc
 from pathlib import Path
 import sys
 import threading
 from types import SimpleNamespace
 import unittest
+import weakref
 from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -16,10 +18,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 import discord
 from discord.player import AudioPlayer
 
-from persona_bot.audio import voice
+from persona_bot.audio import playback, voice
 
 
 class PlaybackLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_controller_does_not_retain_connection_through_finished_player(self) -> None:
+        class Client:
+            def play(self, source, *, after):
+                self._player = threading.Thread()
+                self._player.client = self
+
+        client = Client()
+        controller = playback.get_playback_controller(client)
+        controller.play(client, Mock(spec=discord.AudioSource), after=lambda error: None)
+        reference = weakref.ref(client)
+        del client
+        gc.collect()
+        self.assertIsNone(reference())
+
     async def asyncSetUp(self) -> None:
         self.client = Mock(spec=discord.VoiceClient)
         self.client._player = None
@@ -185,7 +201,7 @@ class PlaybackLifecycleTests(unittest.IsolatedAsyncioTestCase):
         valid = True
         lock = asyncio.Lock()
         await lock.acquire()
-        with patch.object(voice, "_playback_locks", {self.client: lock}):
+        with patch.object(playback.get_playback_controller(self.client), "lock", lock):
             task = asyncio.create_task(voice._play_pcm(self.client, b"pcm", is_valid=lambda: valid))
             try:
                 await asyncio.sleep(0)
@@ -232,7 +248,7 @@ class PlaybackLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
                 blocker = self.loop.run_in_executor(None, occupy)
                 await asyncio.wait_for(occupied.wait(), 2)
-                run_in_thread = voice.run_in_thread
+                run_in_thread = playback.run_in_thread
 
                 async def join_in_thread(func, *args):
                     if func == previous.join:
@@ -242,7 +258,7 @@ class PlaybackLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 queue = deque([voice._SpeechRequest("架空の音声", {}, self.client, 10, lambda: valid)])
                 with patch.object(voice, "_speech_queues", {1: queue}), patch.object(
                     voice, "_synthesize_pcm", AsyncMock(return_value=b"\0" * 16),
-                ), patch.object(voice, "run_in_thread", join_in_thread), patch.object(
+                ), patch.object(playback, "run_in_thread", join_in_thread), patch.object(
                     AudioPlayer, "_do_run", lambda player: None,
                 ):
                     task = asyncio.create_task(voice._run_speech_worker(guild))

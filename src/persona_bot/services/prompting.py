@@ -12,12 +12,23 @@
 """
 
 
+class SanitizedHistory(str):
+    """本文の無害化後にコード側でロールを付けた履歴。外部入力には直接使わない。"""
+
+
+def _history_prompt_data(text: str) -> str:
+    """整形済み履歴は再走査せず、通常の文字列は従来どおり境界を無害化する。"""
+    if isinstance(text, SanitizedHistory):
+        return text
+    return sanitize_prompt_data(text, preserve_history_roles=True)
+
+
 def sanitize_prompt_data(text: str, *, preserve_history_roles: bool = False) -> str:
     """データ内の見出し・ロール行を、プロンプトの構造と同じ表記にしない。
 
     履歴整形では発言本文ごとに既定のまま通してから、コード側でロールを付ける。
-    組み立て済みの履歴・議事録ログだけは preserve_history_roles=True で再確認し、
-    正規のロール表記を維持する。生の履歴を直接このモードへ渡す入口は作らないこと。
+    整形済み履歴は SanitizedHistory で識別し、二重走査しない。通常文字列の履歴は
+    preserve_history_roles=True で見出しを再確認する。生の履歴を直接このモードへ渡さないこと。
     全角化後は同じ処理を重ねても変わらず、本文の改行・通常文は維持する。
     """
     lines: list[str] = []
@@ -63,7 +74,7 @@ def build_full_prompt(
         + memory_sections
         + delegation_section
         + "\n--- 過去の会話履歴 ---\n"
-        + sanitize_prompt_data(history_text, preserve_history_roles=True)
+        + _history_prompt_data(history_text)
         + "\n--- 今回の質問 ---\n"
         + sanitize_prompt_data(question)
     )
@@ -88,7 +99,7 @@ def build_auto_topic_prompt(persona_prompt: str, memory_sections: str, history_t
         + "- 感情タグ（[V:.., A:..] の形式）は絶対に付けないこと。\n"
         + memory_sections
         + "\n--- 過去の会話履歴 ---\n"
-        + sanitize_prompt_data(history_text, preserve_history_roles=True)
+        + _history_prompt_data(history_text)
         + "\n--- 会話履歴ここまで ---\n"
         + "\n上記を踏まえて、あなたからの話しかけの一言だけを出力してください。"
     )
@@ -113,7 +124,7 @@ def build_anniversary_prompt(persona_prompt: str, user_display_name: str, label:
         + "- 過去の会話履歴に関連する話題があれば軽く絡めてもよいが、必須ではない。\n"
         + "- 感情タグ（[V:.., A:..] の形式）は絶対に付けないこと。\n"
         + "\n--- 過去の会話履歴（参考。無くてもよい） ---\n"
-        + sanitize_prompt_data(history_text, preserve_history_roles=True)
+        + _history_prompt_data(history_text)
         + "\n--- 履歴ここまで ---\n"
         + "\n上記を踏まえて、お祝いメッセージの一言だけを出力してください。"
     )
@@ -162,7 +173,7 @@ def build_autonomous_opening_prompt(persona_prompt: str, channel_name: str, hist
         + "- 話し相手を待っていること、気軽に話しかけてほしいこと。\n"
         + _AUTONOMOUS_SPEECH_RULES
         + "\n--- このチャンネルの過去の会話（参考。無くてもよい） ---\n"
-        + sanitize_prompt_data(history_text, preserve_history_roles=True)
+        + _history_prompt_data(history_text)
         + "\n--- 履歴ここまで ---\n"
         + "\n上記を踏まえて、第一声だけを出力してください。"
     )
@@ -194,7 +205,7 @@ def build_autonomous_monologue_prompt(persona_prompt: str, history_text: str, tu
         + "- ときどきは、聞いている人が答えやすい問いかけで終えてもよい。\n"
         + _AUTONOMOUS_SPEECH_RULES
         + "\n--- このチャンネルの会話（直前までのあなたの発言を含む） ---\n"
-        + sanitize_prompt_data(history_text, preserve_history_roles=True)
+        + _history_prompt_data(history_text)
         + "\n--- 履歴ここまで ---\n"
         + "\n上記を踏まえて、独り言だけを出力してください。"
     )
@@ -226,7 +237,7 @@ def build_autonomous_reply_prompt(
         + "- 会話を続けたいので、必要に応じて聞き返してもよい。\n"
         + _AUTONOMOUS_SPEECH_RULES
         + "\n--- このチャンネルの会話 ---\n"
-        + sanitize_prompt_data(history_text, preserve_history_roles=True)
+        + _history_prompt_data(history_text)
         + "\n--- 履歴ここまで ---\n"
         + f"\n--- 今回のコメント（{commenter_name} さん） ---\n"
         + sanitize_prompt_data(comment)
@@ -294,7 +305,7 @@ def build_summary_prompt(persona_prompt: str, period_label: str, source_text: st
         + "・…（無ければ「なし」）\n"
         + "\n（ここにペルソナ口調の締めを1〜2行）\n"
         + "\n--- 会話ログ ---\n"
-        + sanitize_prompt_data(source_text, preserve_history_roles=True)
+        + _history_prompt_data(source_text)
         + "\n--- 会話ログここまで ---\n"
         + "\n上記を議事録として要約してください。"
     )

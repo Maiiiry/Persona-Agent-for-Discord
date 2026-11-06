@@ -326,6 +326,12 @@ class SshSession:
                 raise CommandStateUnknownError(
                     f"{label}: 通信に失敗し、遠隔コマンドの終了を確認できません（{type(error).__name__}: {error}）。"
                 ) from error
+            except CommandStateUnknownError:
+                raise
+            except Exception as error:
+                raise CommandStateUnknownError(
+                    f"{label}: 遠隔コマンドの終了とチャネルの回収を確認できません（{type(error).__name__}）。"
+                ) from error
 
         # 開始途中も保護する。create_process のキャンセルで参照を失う経路を作らない。
         task = asyncio.create_task(execute())
@@ -346,12 +352,16 @@ class SshSession:
                     finished_exit_status = completed.exit_status
                 except asyncio.CancelledError:
                     self.command_state_unknown = True
+                    self._record(
+                        label, command, None, started, ok=False,
+                        error=f"{label}: 遠隔コマンドの終了確認が中断されました。状態不明のため、サーバーで確認してください。",
+                    )
                     raise
                 finally:
                     canceled = state.canceled
                 if canceled:
                     message = f"{label}: 中断されました。遠隔コマンドの終了とチャネルの回収を確認しました。"
-                    self._record(label, command, task.result().exit_status, started, ok=False, error=message)
+                    self._record(label, command, finished_exit_status, started, ok=False, error=message)
                     raise asyncio.CancelledError
                 raise SshError(f"{label}: {timeout:g} 秒以内に応答がありませんでした。遠隔コマンドの終了を確認しました。") from error
         except CommandStateUnknownError as error:

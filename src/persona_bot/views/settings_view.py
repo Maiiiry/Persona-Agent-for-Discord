@@ -21,11 +21,11 @@ from persona_bot.config.personas import (
     refresh_persona_catalog,
 )
 from persona_bot.utils.discord_helpers import (
-    is_administrator, is_bot_owner, is_current_administrator, is_current_bot_owner,
+    is_bot_owner, is_current_administrator, is_current_bot_owner,
 )
 from persona_bot.views.autonomous_channel_view import AutonomousChannelView
 from persona_bot.views.view_parts import (
-    authorize_panel_operation, begin_panel_operation, edit_panel_message, BackButton,
+    authorize_administrator_operation, confirm_administrator_operation, begin_panel_operation, edit_panel_message, BackButton,
     HubFactory, PanelView, select_option_text, swap_panel,
 )
 
@@ -59,6 +59,7 @@ def _build_status_text(
         f"・**NGワード**: {ng_count}件\n"
         f"・**ブラックリスト**: {blacklist_status}"
         f"{_persona_notice(catalog)}"
+        "\n\nサーバーの設定確定は管理者のみ行えます。DMでは本人が変更できます。"
     )
 
 
@@ -169,11 +170,12 @@ class ConfirmButton(ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: SettingsView = self.view  # type: ignore[assignment]
-        begin_panel_operation(view, interaction)
+        notice = "サーバーのキャラ設定を確定できるのは管理者のみです。設定は変更されていません。"
+        if not await authorize_administrator_operation(view, interaction, allow_dm=True, notice=notice, refresh=False):
+            return
 
         # ペルソナを変えたときだけ、選んだファイルが prompts/ にあるかを確かめる。
         # 変えていなければ、見つからない保存値もそのまま残す（ファイルを戻せば元に戻る）。
-        await interaction.response.defer(ephemeral=True)
         persona_changed = view.temp_persona != view.guild_settings.current_prompt_file
         if persona_changed and not await run_in_thread(is_selectable_persona, view.temp_persona):
             await edit_panel_message(interaction, deferred=True,
@@ -183,7 +185,7 @@ class ConfirmButton(ui.Button):
             return
 
         # 一時選択値をこのサーバー（ギルド）専用の設定に反映し、DB へ保存する
-        if not await view.ensure_settings_current(interaction):
+        if not await confirm_administrator_operation(view, interaction, allow_dm=True, notice=notice):
             return
         view.guild_settings.current_prompt_file = view.temp_persona
         view.guild_settings.current_model_name = view.temp_model
@@ -258,9 +260,8 @@ class OpenAutonomousChannelButton(ui.Button):
 
         # ボタンは管理者にしか出さないが、押した時点の権限でも確かめる（DM には配信先が無い）。
         guild = interaction.guild
-        if not await authorize_panel_operation(
-            view, interaction, allowed=guild is not None and is_administrator(interaction.user),
-            recheck=is_current_administrator, notice="この機能はサーバー管理者のみ利用できます。",
+        if not await authorize_administrator_operation(
+            view, interaction, notice="この機能はサーバー管理者のみ利用できます。",
         ):
             return
         async def make_settings(back_interaction: discord.Interaction) -> SettingsView:

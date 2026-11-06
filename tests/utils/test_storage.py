@@ -41,6 +41,18 @@ class JsonStorageTests(unittest.TestCase):
         self.assertEqual(default, {"users": {}})
         self.assertFalse(self.path.exists())
 
+    def test_write_creates_missing_parent_directories(self) -> None:
+        path = self.root / "new" / "nested" / "projects.json"
+        write_json_file(path, self.updated)
+        self.assertEqual(load_json_file(path, {}), self.updated)
+        self.assertEqual(list(path.parent.iterdir()), [path])
+
+    def test_serialization_failure_does_not_create_parent_directories(self) -> None:
+        path = self.root / "new" / "projects.json"
+        with self.assertRaises(TypeError):
+            write_json_file(path, {"unsupported": object()})
+        self.assertFalse(path.parent.exists())
+
     def test_valid_file_keeps_all_users(self) -> None:
         self.seed()
         self.assertEqual(load_json_file(self.path, {}), self.original)

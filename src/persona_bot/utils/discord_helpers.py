@@ -26,7 +26,7 @@ from persona_bot.config.constants import (
 )
 from persona_bot.utils.timeutil import resolve_timezone
 from persona_bot.core.background import run_in_thread
-from persona_bot.services.prompting import sanitize_prompt_data
+from persona_bot.services.prompting import SanitizedHistory, sanitize_prompt_data
 
 
 logger = logging.getLogger(__name__)
@@ -127,7 +127,7 @@ def build_history_text(
         if not all(attachment_is_image(attachment) for attachment in history_message.attachments):
             clean_content += " [添付ファイルあり]"
         lines.append(f"{role}: {clean_content}")
-    return "\n".join(lines)
+    return SanitizedHistory("\n".join(lines))
 
 
 async def fetch_channel_history_text(
@@ -218,7 +218,7 @@ def build_summary_source_text(
         # created_at は UTC。表示用のタイムゾーン（既定は SUMMARY_TIMEZONE）へ明示的に変換する。
         timestamp = history_message.created_at.astimezone(display_tz).strftime("%m/%d %H:%M")
         lines.append(f"[{timestamp}] {speaker}: {content}")
-    return "\n".join(lines)
+    return SanitizedHistory("\n".join(lines))
 
 
 async def fetch_messages_since(
@@ -625,4 +625,4 @@ def can_bot_send_messages(channel: Any, member: Any) -> bool:
 
 def channel_display_name(channel: Any) -> str:
     """名前のないチャンネルも識別可能な表示名にする。"""
-    return getattr(channel, "name", None) or f"channel {channel.id}"
+    return getattr(channel, "name", None) or f"channel {getattr(channel, 'id', None) or '不明'}"

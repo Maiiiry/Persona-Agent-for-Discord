@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import logging
 import asyncio
-import threading
 from collections import deque
 from dataclasses import dataclass, field
 from statistics import quantiles
@@ -37,7 +36,7 @@ from typing import Any, Callable
 import discord
 
 from persona_bot.audio.live_audio import DISCORD_FRAME_BYTES, LivePlaybackSource, Upsampler, frame_rms
-from persona_bot.audio.voice import _get_audio_player
+from persona_bot.audio.playback import get_playback_controller
 from persona_bot.audio.voice_receive import LiveVoiceClient, VoiceReceiver
 from persona_bot.config.constants import (
     LIVE_BARGE_IN_MS,
@@ -63,7 +62,7 @@ from persona_bot.config.constants import (
 )
 from persona_bot.config.paths import load_persona_template
 from persona_bot.config.personas import current_persona_catalog
-from persona_bot.core.background import run_in_thread, spawn, wait_for_cleanup
+from persona_bot.core.background import spawn, wait_for_cleanup
 from persona_bot.services.violation_notice import record_violation_notice
 from persona_bot.services.content_moderator import VERDICT_SAFE, VERDICT_UNSAFE
 from persona_bot.services.live_session import CLOSED_QUOTA, LiveOptions, LiveSession, LiveUnavailableError
@@ -305,7 +304,7 @@ class VoiceConversation:
         self._playback: LivePlaybackSource | None = None
         self._playback_owner: _Utterance | None = None
         self._playback_started = False
-        self._previous_player: threading.Thread | None = None
+        self._playback_controller = get_playback_controller(voice_client)
         self._upsampler = Upsampler()
         self._send_queue: asyncio.Queue[tuple[str, bytes]] = asyncio.Queue()
         # いまの Live の接続（世代）で activity_start を送ったか。送っていなければ None。
@@ -842,11 +841,8 @@ class VoiceConversation:
     # ==================================================================
 
     async def _wait_previous_player(self) -> None:
-        player = self._previous_player
-        if player is not None:
-            await run_in_thread(player.join)
-            if self._previous_player is player:
-                self._previous_player = None
+        async with self._playback_controller.lock:
+            await self._playback_controller.wait_for_players()
 
     async def _start_playback(self) -> None:
         source = self._playback
@@ -863,18 +859,15 @@ class VoiceConversation:
             loop.call_soon_threadsafe(self._on_playback_finished, source)
 
         try:
-            # stop() や after 通知の後にも終了処理中のスレッドは残る。
-            # 参照を失う前に控え、共有のエンコーダーを次の再生へ渡す前に終了を待つ。
-            player = _get_audio_player(self.voice_client)
-            if player is not None:
-                self._previous_player = player
-            if self.voice_client.is_playing() or self.voice_client.is_paused():
-                self.voice_client.stop()
-            await self._wait_previous_player()
-            if (self._stopped or self._playback is not source or source.aborted
-                    or owner is None or owner.discarded or not self.voice_client.is_connected()):
-                return
-            self.voice_client.play(source, after=after_playing)
+            async with self._playback_controller.lock:
+                if (self._stopped or self._playback is not source or source.aborted
+                        or owner is None or owner.discarded):
+                    return
+                await self._playback_controller.prepare(self.voice_client)
+                if (self._stopped or self._playback is not source or source.aborted
+                        or owner.discarded or not self.voice_client.is_connected()):
+                    return
+                self._playback_controller.play(self.voice_client, source, after=after_playing)
             if owner.ended_at is not None and owner.playback_started_at is None:
                 # stall 後に同じ発話を再開しても初回だけ記録する。
                 owner.playback_started_at = self._now()
@@ -889,6 +882,7 @@ class VoiceConversation:
             self._on_playback_finished(source)
 
     def _on_playback_finished(self, source: LivePlaybackSource) -> None:
+        self._playback_controller.release(source)
         if self._playback is source:
             self._playback = None
             self._playback_owner = None
@@ -904,11 +898,7 @@ class VoiceConversation:
         started, self._playback_started = self._playback_started, False
         if started:
             try:
-                player = _get_audio_player(self.voice_client)
-                if player is not None:
-                    self._previous_player = player
-                if self.voice_client.is_playing() or self.voice_client.is_paused():
-                    self.voice_client.stop()
+                self._playback_controller.stop(self.voice_client, source=source)
             except Exception:
                 logger.debug("音声会話: 再生の停止に失敗しました。", exc_info=True)
 

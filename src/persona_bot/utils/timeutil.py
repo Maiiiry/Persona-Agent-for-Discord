@@ -59,7 +59,8 @@ def resolve_timezone(name: str, *, purpose: str = "") -> tzinfo:
 
     Args:
         name: "Asia/Tokyo" のような IANA タイムゾーン名。
-        purpose: 失敗時のログに出す用途名（例: "記念日の判定"）。原因を追いやすくする。
+        purpose: 呼出元の用途を示す互換用の引数。用途名や設定値は非公開情報を
+            含みうるため、失敗時にもログへ出さない。
     """
     try:
         return ZoneInfo(name)

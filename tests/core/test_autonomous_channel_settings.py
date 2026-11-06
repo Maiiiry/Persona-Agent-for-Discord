@@ -32,7 +32,8 @@ class AutonomousChannelPersistenceTests(unittest.IsolatedAsyncioTestCase):
             self.db.initialize()
 
     async def test_version_fourteen_rows_migrate_to_unset_and_keep_other_settings(self) -> None:
-        with patch.object(database, "SCHEMA_VERSION", 14), patch("persona_bot.core.database.logger"):
+        with patch.object(database, "SCHEMA_VERSION", 14), patch("persona_bot.core.database.logger"), \
+                patch.object(self.db, "_validate_guild_settings_schema"):
             self.db.initialize()
         with self.db._lock, self.db._conn:
             self.db._conn.execute(

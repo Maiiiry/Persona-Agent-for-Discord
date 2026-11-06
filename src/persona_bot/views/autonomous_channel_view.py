@@ -23,9 +23,8 @@ from discord import ui
 from persona_bot.config.constants import DISCORD_SELECT_MAX_OPTIONS
 from persona_bot.core.app_state import GuildSettings
 from persona_bot.services.autonomous_stage import can_use_stage, can_use_voice, find_channel
-from persona_bot.utils.discord_helpers import is_current_administrator
 from persona_bot.views.view_parts import (
-    authorize_panel_operation, begin_panel_operation, edit_panel_message, BackButton,
+    authorize_administrator_operation, begin_panel_operation, edit_panel_message, BackButton,
     HubFactory, PanelView, select_option_text,
 )
 
@@ -126,8 +125,8 @@ class AutonomousChannelConfirmButton(ui.Button):
         view: AutonomousChannelView = self.view  # type: ignore[assignment]
         # パネルを開いた後で管理者でなくなった人には保存させない。押した時点の
         # interaction.user は後から更新されないため、Member を取り直して判定する。
-        if not await authorize_panel_operation(
-            view, interaction, allowed=True, recheck=is_current_administrator, notice=NOT_ADMIN_NOTICE,
+        if not await authorize_administrator_operation(
+            view, interaction, notice=NOT_ADMIN_NOTICE,
         ):
             return
 

@@ -50,6 +50,7 @@ def load_json_file(path: Path, default_value: dict[str, Any]) -> dict[str, Any]:
 def write_json_file(path: Path, data: dict[str, Any]) -> None:
     """同じディレクトリで内容を同期してから置換し、保存中の失敗で原本を壊さない。"""
     serialized = json.dumps(data, ensure_ascii=False, indent=2)
+    path.parent.mkdir(parents=True, exist_ok=True)
     try:
         existing_mode = stat.S_IMODE(path.stat().st_mode)
     except FileNotFoundError:

@@ -54,7 +54,7 @@ class ProfileKeyIndexTests(unittest.TestCase):
         self.assertEqual(self.db.profile_load("user-a"), {"趣味": "架空の工作"})
 
     def test_version_thirteen_migration_preserves_missing_and_invalid_json(self) -> None:
-        with patch.object(database, "SCHEMA_VERSION", 13):
+        with patch.object(database, "SCHEMA_VERSION", 13), patch.object(self.db, "_validate_guild_settings_schema"):
             self.db.initialize()
         self.db.profile_merge("user-a", {"anniversaries": [{"label": "架空の記念日", "month": 5, "day": 1}]})
         self.db.profile_merge("user-b", {"anniversaries": [], "趣味": "架空の読書"})
@@ -71,7 +71,7 @@ class ProfileKeyIndexTests(unittest.TestCase):
         self.assertEqual(self.db.profile_load("user-b"), {"anniversaries": [], "趣味": "架空の読書"})
 
     def test_representative_database_searches_index_and_preserves_results(self) -> None:
-        with patch.object(database, "SCHEMA_VERSION", 13):
+        with patch.object(database, "SCHEMA_VERSION", 13), patch.object(self.db, "_validate_guild_settings_schema"):
             self.db.initialize()
         # Issueの再現と同じ10万件の無関係なキーと、10人の記念日だけを使う。
         with self.db._lock, self.db._conn:

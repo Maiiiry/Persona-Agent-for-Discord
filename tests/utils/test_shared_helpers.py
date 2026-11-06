@@ -54,6 +54,17 @@ class GroundingSourceMaskTests(unittest.TestCase):
         self.assertEqual(source["title"], "架空NG[の資料]")
 
 
+class ChannelDisplayNameTests(unittest.TestCase):
+    def test_missing_name_and_id_have_a_safe_label(self):
+        for channel in (None, object(), SimpleNamespace(), SimpleNamespace(name=None, id=None)):
+            with self.subTest(channel=channel):
+                self.assertEqual(discord_helpers.channel_display_name(channel), "channel 不明")
+
+    def test_existing_names_and_ids_keep_their_label(self):
+        self.assertEqual(discord_helpers.channel_display_name(SimpleNamespace(name="架空の会場", id=12)), "架空の会場")
+        self.assertEqual(discord_helpers.channel_display_name(SimpleNamespace(id=12)), "channel 12")
+
+
 def make_interaction(*, user=None):
     return SimpleNamespace(
         user=user,

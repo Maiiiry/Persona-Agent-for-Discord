@@ -10,7 +10,7 @@ from unittest.mock import ANY, AsyncMock, Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 import discord
-from persona_bot.audio import voice
+from persona_bot.audio import playback, voice
 
 
 class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
@@ -87,7 +87,7 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
                     await self.real_play(*args, **kwargs)
 
                 with patch.object(voice, "_play_pcm", side_effect=play), patch.object(
-                    voice, "_playback_locks", {self.client: lock},
+                    playback.get_playback_controller(self.client), "lock", lock,
                 ), patch.object(voice, "_play_pcm_locked", AsyncMock()) as locked_play:
                     if change == "normal_reply_move":
                         await voice.speak_text(self.guild, "通常の架空の返信")
