@@ -19,7 +19,7 @@
                 <mxCell id="a1_grp_store" value="永続化層" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FAFAFA;strokeColor=#B3B3B3;fontColor=#333333;fontSize=15;fontStyle=1;fontFamily=Meiryo UI;verticalAlign=top;align=left;spacingLeft=14;spacingTop=6;dashed=0;container=1;collapsible=0;" parent="1" vertex="1">
                     <mxGeometry x="840" y="760" width="920" height="560" as="geometry"/>
                 </mxCell>
-                <mxCell id="a1_ttl" value="A-1 システム全体構成と起動フロー ― Persona Chat in Discord" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=24;fontStyle=1;fontColor=#1A1A1A;fontFamily=Meiryo UI;" parent="1" vertex="1">
+                <mxCell id="a1_ttl" value="A-1 システム全体構成と起動フロー ― Persona Agent for Discord" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=24;fontStyle=1;fontColor=#1A1A1A;fontFamily=Meiryo UI;" parent="1" vertex="1">
                     <mxGeometry x="60" y="30" width="1000" height="50" as="geometry"/>
                 </mxCell>
                 <mxCell id="a1_package_layout" value="起動は src/bot.py。各モジュールのパスは src/persona_bot/ 基準（config/・core/・services/・views/・audio/・utils/）。" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=12;fontColor=#666666;fontFamily=Meiryo UI;" parent="1" vertex="1">

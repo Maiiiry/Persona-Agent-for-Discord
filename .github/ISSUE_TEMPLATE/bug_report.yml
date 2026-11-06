@@ -7,7 +7,7 @@ body:
     attributes:
       value: |
         既存のIssueを確認してから報告してください。
-        脆弱性は公開せず、[セキュリティポリシー](https://github.com/RI0806123789/Persona-Chat-in-Discord/blob/main/SECURITY.md) の窓口へ連絡してください。
+        脆弱性は公開せず、[セキュリティポリシー](https://github.com/RI0806123789/Persona-Agent-for-Discord/blob/main/SECURITY.md) の窓口へ連絡してください。
         APIキー・Discordトークン・個人情報・実際の会話ログは記載せず、架空の内容で再現してください。
   - type: input
     id: version
@@ -70,5 +70,5 @@ body:
           required: true
         - label: シークレット・個人情報を除き、脆弱性の報告は専用窓口へ送ります。
           required: true
-        - label: "[行動規範](https://github.com/RI0806123789/Persona-Chat-in-Discord/blob/main/CODE_OF_CONDUCT.md) に従います。"
+        - label: "[行動規範](https://github.com/RI0806123789/Persona-Agent-for-Discord/blob/main/CODE_OF_CONDUCT.md) に従います。"
           required: true

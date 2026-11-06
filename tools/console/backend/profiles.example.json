@@ -20,7 +20,7 @@
       "known_hosts": null,
       "use_ssh_config": true,
       "service": "bot",
-      "bot_dir": "/home/YOUR_SSH_USER/Persona-Chat-in-Discord",
+      "bot_dir": "/home/YOUR_SSH_USER/Persona-Agent-for-Discord",
       "deploy_branch": "main",
       "python": ".venv/bin/python",
       "journal_sudo": false,

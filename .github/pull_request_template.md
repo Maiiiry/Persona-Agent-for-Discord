@@ -25,7 +25,7 @@
 - [ ] 日本語の文言・コメントと既存の構成に合わせています。
 - [ ] 依存ライブラリを追加した場合、事前に合意しています（追加なしならチェック）。
 - [ ] 必要なドキュメント・設定例・保存／復元処理を更新しました（該当なしならチェック）。
-- [ ] [貢献ガイド](https://github.com/RI0806123789/Persona-Chat-in-Discord/blob/main/CONTRIBUTING.md) と [行動規範](https://github.com/RI0806123789/Persona-Chat-in-Discord/blob/main/CODE_OF_CONDUCT.md) を確認しました。
+- [ ] [貢献ガイド](https://github.com/RI0806123789/Persona-Agent-for-Discord/blob/main/CONTRIBUTING.md) と [行動規範](https://github.com/RI0806123789/Persona-Agent-for-Discord/blob/main/CODE_OF_CONDUCT.md) を確認しました。
 
 ## 関連Issue
 

@@ -1,5 +1,5 @@
 # =============================================================================
-# Persona Chat in Discord — systemd ユニット（公開用テンプレート）
+# Persona Agent for Discord — systemd ユニット（公開用テンプレート）
 #
 # このファイルは Git 管理対象。実運用では deploy/bot.service（.gitignore 済み）
 # へコピーし、<PROJECT_DIR> と <USER> を自分の環境の実値へ置換して使う。
@@ -9,7 +9,7 @@
 # =============================================================================
 
 [Unit]
-Description=Persona Chat in Discord (Gemini ベースの Discord ボット)
+Description=Persona Agent for Discord (Gemini ベースの Discord ボット)
 
 # Discord と Gemini の両方へ接続できて初めて意味を持つプロセスなので、
 # 「NIC の設定が始まった」ことしか保証しない network.target ではなく、
