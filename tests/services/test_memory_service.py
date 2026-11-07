@@ -358,6 +358,75 @@ class DocumentSummaryCompactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(read.call_count, 2)
         self.assertEqual([self.db.pending_fetch_entries(f"user-{index}") for index in range(7)], original)
 
+    def make_flusher(self, failing: set[str], called: list[str]):
+        """_flush_user の代わり。failing のユーザーは例外を出し、それ以外は圧縮済みとしてログを消す。"""
+        async def flush_user(user_id, entries):
+            called.append(user_id)
+            if user_id in failing:
+                raise OSError("架空のユーザー固有の障害")
+            self.db.pending_clear_upto(user_id, max(entry["id"] for entry in entries))
+
+        return flush_user
+
+    async def test_persistently_failing_leading_users_do_not_starve_later_users(self):
+        """先頭の3人が失敗し続けても、次の巡回では後続のユーザーが処理される（#380）。"""
+        users = [f"user-{index}" for index in range(6)]
+        for user_id in users:
+            await self.service.append_pending_log(user_id, "架空の質問", "架空の応答")
+        failing, called = {"user-0", "user-1", "user-2"}, []
+        with patch.object(self.service, "_flush_user", side_effect=self.make_flusher(failing, called)):
+            await self.service.flush_if_needed(force=True)
+            # 1回目は連続失敗の上限で先頭の3人だけを試して終わる
+            self.assertEqual(called, ["user-0", "user-1", "user-2"])
+            await self.service.flush_if_needed(force=True)
+        # 2回目は続きの user-3 から始まり、後続の3人が処理されてログが空になる
+        self.assertEqual(called[3:6], ["user-3", "user-4", "user-5"])
+        for user_id in ("user-3", "user-4", "user-5"):
+            self.assertEqual(self.db.pending_fetch_entries(user_id), [])
+        # 失敗した3人の原データは消えず、一巡した後に再試行される
+        for user_id in failing:
+            self.assertEqual(len(self.db.pending_fetch_entries(user_id)), 1)
+        self.assertIn("user-0", called[6:])
+
+    async def test_rotation_keeps_attempts_bounded_when_every_user_fails(self):
+        """全体障害では1回の巡回の試行数は上限のまま、巡回を重ねると全員に機会が回る。"""
+        users = [f"user-{index}" for index in range(7)]
+        for user_id in users:
+            await self.service.append_pending_log(user_id, "架空の質問", "架空の応答")
+        original = [self.db.pending_fetch_entries(user_id) for user_id in users]
+        limit = memory_service.MEMORY_FLUSH_MAX_CONSECUTIVE_ERRORS
+        seen: set[str] = set()
+        for _ in range(3):
+            called: list[str] = []
+            with patch.object(self.service, "_flush_user", side_effect=self.make_flusher(set(users), called)):
+                await self.service.flush_if_needed(force=True)
+            self.assertEqual(len(called), limit)
+            seen.update(called)
+        self.assertEqual(seen, set(users))
+        self.assertEqual([self.db.pending_fetch_entries(user_id) for user_id in users], original)
+
+    async def test_skipped_users_also_advance_the_cursor(self):
+        """しきい値に達していないユーザーを飛ばしても、次の巡回はその続きから始まる。"""
+        for user_id in ("user-a", "user-b", "user-c"):
+            await self.service.append_pending_log(user_id, "架空の質問", "架空の応答")
+        called: list[str] = []
+        with patch.object(self.service, "_flush_user", side_effect=self.make_flusher(set(), called)):
+            await self.service.flush_if_needed()  # force なし: 少量かつアイドルでないので全員見送り
+        self.assertEqual(called, [])
+        self.assertEqual(self.service._flush_cursor, "user-c")
+
+    def test_order_from_cursor_rotates_a_single_pass(self):
+        order = self.service._order_from_cursor
+        self.assertEqual(order(["user-c", "user-a", "user-b"]), ["user-a", "user-b", "user-c"])
+        self.service._flush_cursor = "user-b"
+        self.assertEqual(order(["user-a", "user-b", "user-c", "user-d"]), ["user-c", "user-d", "user-a", "user-b"])
+        # 区切りだったユーザーが居なくなっても、その位置から続けられる
+        self.assertEqual(order(["user-a", "user-c"]), ["user-c", "user-a"])
+        # 末尾まで進んでいれば先頭へ戻る
+        self.service._flush_cursor = "user-z"
+        self.assertEqual(order(["user-a", "user-c"]), ["user-a", "user-c"])
+        self.assertEqual(order([]), [])
+
     async def test_flush_cancellation_propagates_and_preserves_all_pending(self):
         for user_id in ("user-a", "user-b"):
             await self.service.append_pending_log(user_id, "架空の質問", "架空の応答")

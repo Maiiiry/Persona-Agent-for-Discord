@@ -20,6 +20,7 @@ projects.json は LLM が構造を自由に決める JSON のため、
 ■ 旧データの取り込み
 初回起動時、旧ファイルが残っていれば内容を DB へ取り込み、二重取り込みを
 防ぐためファイルを「<元の名前>.imported.bak」に改名して残す（バックアップ兼用）。
+同名の退避ファイルが既にあるときは上書きせず、「<元の名前>.imported.<連番>.bak」にする。
 JSON として読めない・最上位が object でないファイルは取り込まず、改名もせずに
 元の名前のまま残して警告する（次回起動時に再試行される）。
 
@@ -53,6 +54,7 @@ from persona_bot.config.constants import (
     AFFINITY_MAX,
     AFFINITY_MIN,
     AFFINITY_NEUTRAL,
+    LEGACY_BACKUP_MAX_SUFFIX,
     REMINDER_MAX_PENDING_PER_USER,
     STATS_HOURLY_BUCKETS,
     STATS_OPT_OUT_DEFAULT,
@@ -327,6 +329,29 @@ def _load_legacy_json_object(path: Path) -> dict[str, Any]:
     return data
 
 
+def _free_backup_path(path: Path) -> Path:
+    """旧ファイルの退避先を、既存のファイルと衝突しない名前で返す（#379）。
+
+    通常は「<元の名前>.imported.bak」。すでに同名のファイルがあるときは、
+    「<元の名前>.imported.<連番>.bak」の空いている最小の番号にする。
+    Path.replace は既存のファイルを黙って置き換えるため、名前を決めずに改名すると、
+    前回の退避ファイルが消える。特に引き継ぎ先が無いときの pending_log.txt は
+    DB へ取り込まれず、退避ファイルが唯一のコピーになる。
+    空きが見つからなければ FileExistsError にする（呼び出し側が取り込みごと見送り、
+    元のファイルを残して警告する）。
+    """
+    candidates = [path.with_name(path.name + ".imported.bak")]
+    candidates += [
+        path.with_name(f"{path.name}.imported.{number}.bak")
+        for number in range(1, LEGACY_BACKUP_MAX_SUFFIX + 1)
+    ]
+    for candidate in candidates:
+        # 壊れたシンボリックリンクは exists() が偽になるため、is_symlink() も見る
+        if not candidate.exists() and not candidate.is_symlink():
+            return candidate
+    raise FileExistsError(f"退避先の名前が空いていません（{path.name}）")
+
+
 def _affinity_row_params(user_id: Any, entry: dict[str, Any]) -> tuple[str, Any, Any, Any, Any]:
     """affinity テーブル1行分の保存パラメータ（列順は user_id, affinity, valence, arousal, last_interaction）。
 
@@ -480,8 +505,10 @@ class Database:
             if not path.exists():
                 continue
             try:
+                # 退避先は取り込みの前に決める。空きが無ければ取り込まずに元のファイルを残す。
+                # 起動処理は単一のスレッドで動くため、決めてから改名するまでに同名は作られない。
+                backup_path = _free_backup_path(path)
                 importer(path)
-                backup_path = path.with_name(path.name + ".imported.bak")
                 path.replace(backup_path)
                 logger.info(f'データベース: {filename} を取り込み、{backup_path.name} に改名しました。')
             except Exception as error:
