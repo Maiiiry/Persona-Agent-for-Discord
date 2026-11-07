@@ -447,6 +447,71 @@ class LegacyDataEdgeCaseTests(unittest.TestCase):
         self.assertFalse((self.root / "affinity.json").exists())
         self.assertTrue((self.root / "affinity.json.imported.bak").exists())
 
+    def test_existing_backup_is_not_overwritten_by_a_new_legacy_file(self) -> None:
+        """同名の退避ファイルがあっても上書きせず、連番の名前へ退避する（#379）。"""
+        old_text = "[2026-01-01] User: 以前の架空の質問\n[2026-01-01] Bot: 以前の架空の応答\n"
+        new_text = "[2026-02-01] User: 新しい架空の質問\n[2026-02-01] Bot: 新しい架空の応答\n"
+        existing = self.root / "pending_log.txt.imported.bak"
+        existing.write_text(old_text, encoding="utf-8")
+        source = self.root / "pending_log.txt"
+        source.write_text(new_text, encoding="utf-8")
+        # 引き継ぎ先が無いと旧ログはDBへ入らない。退避ファイルが唯一のコピーになる経路。
+        self.open("").initialize()
+        self.assertEqual(existing.read_text(encoding="utf-8"), old_text)
+        self.assertFalse(source.exists())
+        self.assertEqual(
+            (self.root / "pending_log.txt.imported.1.bak").read_text(encoding="utf-8"), new_text,
+        )
+
+    def test_backup_numbers_skip_every_existing_backup(self) -> None:
+        for name in ("affinity.json.imported.bak", "affinity.json.imported.1.bak"):
+            (self.root / name).write_text('{"previous": {}}', encoding="utf-8")
+        (self.root / "affinity.json").write_text('{"test-user": {"affinity": 61}}', encoding="utf-8")
+        db = self.open()
+        db.initialize()
+        self.assertEqual(db.affinity_load_all()["test-user"]["affinity"], 61)
+        self.assertEqual((self.root / "affinity.json.imported.bak").read_text(encoding="utf-8"), '{"previous": {}}')
+        self.assertEqual((self.root / "affinity.json.imported.1.bak").read_text(encoding="utf-8"), '{"previous": {}}')
+        self.assertIn("test-user", (self.root / "affinity.json.imported.2.bak").read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "affinity.json").exists())
+
+    def test_every_legacy_file_keeps_its_existing_backup(self) -> None:
+        sources = {
+            "affinity.json": '{"test-user": {"affinity": 61}}',
+            "user_stats.json": '{"test-user": {"total_count": 3}}',
+            "queue.json": '{"tasks": []}',
+            "pending_log.txt": "[2026-01-01] User: 架空の質問\n[2026-01-01] Bot: 架空の応答\n",
+        }
+        for name, text in sources.items():
+            (self.root / name).write_text(text, encoding="utf-8")
+            (self.root / f"{name}.imported.bak").write_text(f"previous:{name}", encoding="utf-8")
+        self.open("owner-user").initialize()
+        for name, text in sources.items():
+            with self.subTest(file=name):
+                self.assertEqual((self.root / f"{name}.imported.bak").read_text(encoding="utf-8"), f"previous:{name}")
+                self.assertEqual((self.root / f"{name}.imported.1.bak").read_text(encoding="utf-8"), text)
+                self.assertFalse((self.root / name).exists())
+
+    def test_import_is_skipped_and_source_kept_when_no_backup_name_is_free(self) -> None:
+        """退避名の空きが無ければ、取り込まずに元のファイルと既存の退避を両方残す。"""
+        existing = self.root / "pending_log.txt.imported.bak"
+        existing.write_text("以前の退避", encoding="utf-8")
+        source = self.root / "pending_log.txt"
+        text = "[2026-01-01] User: 架空の質問\n[2026-01-01] Bot: 架空の応答\n"
+        source.write_text(text, encoding="utf-8")
+        db = self.open("owner-user")
+        with patch("persona_bot.core.database.LEGACY_BACKUP_MAX_SUFFIX", 0):
+            db.initialize()
+        self.assertEqual(existing.read_text(encoding="utf-8"), "以前の退避")
+        self.assertEqual(source.read_text(encoding="utf-8"), text)
+        self.assertEqual(db.pending_fetch_entries("owner-user"), [])
+        self.assertEqual(db._conn.execute("SELECT COUNT(*) FROM legacy_imports").fetchone()[0], 0)
+        # 空きができた次回の起動で取り込まれ、重複しない
+        db.initialize()
+        self.assertEqual(len(db.pending_fetch_entries("owner-user")), 1)
+        self.assertFalse(source.exists())
+        self.assertEqual(existing.read_text(encoding="utf-8"), "以前の退避")
+
     def test_close_waits_for_a_running_operation_and_is_repeatable(self) -> None:
         db = self.open()
         db.initialize()

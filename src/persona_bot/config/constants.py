@@ -94,6 +94,9 @@ MEMORY_ROUTE_CATEGORIES = ("profile", "projects", "none")
 # 空文字のときは引き継ぎ処理自体が行われない。旧・全体共有形式のデータが
 # 残っている環境から移行する場合のみ、その所有者の Discord ユーザーIDを入れること。
 LEGACY_MEMORY_OWNER_ID = ""
+# 旧ファイルの退避名（<元の名前>.imported.bak）が既にあるときに試す連番の上限（#379）。
+# 既存の退避ファイルを上書きしないための歯止めで、通常は連番まで進まない。
+LEGACY_BACKUP_MAX_SUFFIX = 1000
 
 # 親密度 / 感情（affinity_service.py）用
 # valence（機嫌）/ arousal（テンション）が中立値へ戻るまでの半減期（秒）。

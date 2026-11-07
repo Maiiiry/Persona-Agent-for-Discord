@@ -1,3 +1,4 @@
+import bisect
 import logging
 import asyncio
 import copy
@@ -141,6 +142,11 @@ class MemoryService:
         # 記憶圧縮の連続失敗回数をユーザー別に数える（あるユーザーの失敗が
         # 他ユーザーの pending_log クリア判定に影響しないようにする）。
         self._compact_fail_count: dict[str, int] = {}
+        # 前回の巡回で最後に確認したユーザーID（#380）。次の巡回はその次のユーザーから始める。
+        # 一覧は常に昇順なので、毎回先頭から始めると、先頭のユーザーが例外を出し続けたときに
+        # 連続失敗の上限で毎回そこで打ち切られ、後続のユーザーが永久に見送られる。
+        # 再起動で先頭へ戻ってよい一時状態のため永続化しない。flush_lock の下でだけ更新する。
+        self._flush_cursor: str | None = None
 
     def ensure_storage(self) -> None:
         # プロフィール記憶は DB の profile テーブルが本体（ユーザー別）。profile.json は
@@ -351,7 +357,7 @@ class MemoryService:
             # 一度に大量の API 呼び出しが走らないようにする（残りは次回の見回りで処理）。
             processed = 0
             consecutive_errors = 0
-            for user_id in user_ids:
+            for user_id in self._order_from_cursor(user_ids):
                 if processed >= MEMORY_FLUSH_MAX_USERS_PER_RUN:
                     break
                 counted = False
@@ -379,6 +385,23 @@ class MemoryService:
                         break
                 else:
                     consecutive_errors = 0
+                finally:
+                    # 成功・見送り・失敗・上限による中断のどれでも、確認したユーザーの次から再開する。
+                    # 失敗したユーザーの原データと失敗回数は残るので、一巡した後に再試行される。
+                    self._flush_cursor = str(user_id)
+
+    def _order_from_cursor(self, user_ids: list[str]) -> list[str]:
+        """前回の巡回の続きから始まる順にユーザーIDを並べる（#380）。
+
+        全員を一度ずつ含む1周分の並びで、先頭の人数を数える回数・連続失敗の上限は
+        呼び出し側がそのまま適用する。失敗が続くユーザーを先頭に固定しないことと、
+        共有ストレージの障害時に1回の巡回での試行回数を増やさないことを両立する。
+        """
+        ordered = sorted(str(user_id) for user_id in user_ids)
+        if self._flush_cursor is None:
+            return ordered
+        start = bisect.bisect_right(ordered, self._flush_cursor)
+        return ordered[start:] + ordered[:start]
 
     def _pending_user_ids(self) -> list[str]:
         """同じ io_lock 内の初期化と取得を、1回のワーカー呼出で完了する。"""
