@@ -10,6 +10,7 @@ import json
 import math
 import re
 import shlex
+from collections.abc import Iterable
 from pathlib import Path
 
 # systemctl show で取り出す項目
@@ -207,9 +208,43 @@ def deploy_pip_check_command(bot_dir: str, python: str) -> str:
     return _in_bot_dir(bot_dir, f"{shlex.quote(check_python(python))} -m pip check")
 
 
-def deploy_reset_command(bot_dir: str, commit: str) -> str:
-    """巻き戻し: コードをデプロイ前のコミットへ戻す。取り込んだコミットは GitHub に残るので失われない。"""
-    return _in_bot_dir(bot_dir, f"git reset --hard {check_commit(commit)} && git rev-parse HEAD")
+# 巻き戻しコマンドが、コードに触れずに止まったときの終了コード（理由は deploy.py が画面に出す）。
+# git 自身の失敗（1・128 など）とは重ならない番号にしてある。
+ROLLBACK_EXIT_UNREADABLE = 3  # ブランチ・HEAD・変更の有無を読めなかった
+ROLLBACK_EXIT_BRANCH_CHANGED = 10  # デプロイ中に別のブランチへ移っていた
+ROLLBACK_EXIT_UNEXPECTED_HEAD = 11  # HEAD がデプロイ前でも取り込み後でもない
+ROLLBACK_EXIT_TREE_CHANGED = 12  # 追跡ファイルに未コミットの変更がある
+
+
+def deploy_rollback_command(bot_dir: str, branch: str, commit: str, expected_heads: Iterable[str] = ()) -> str:
+    """巻き戻し: デプロイ前のコミット（commit）へ戻す。取り込んだコミットは GitHub に残るので失われない。
+
+    **1回の遠隔コマンドの中で**、戻す直前に次の3つを確かめ、1つでも外れていたらコードに触れずに止まる
+    （終了コードは ROLLBACK_EXIT_*。標準出力の先頭行に見つけた値を出す）:
+      - 今のブランチが branch である（別のブランチへ移っていたら、その参照を書き換えない）
+      - HEAD が commit か expected_heads（取り込み先・取り込み後）のどれかである
+      - 追跡ファイルに未コミットの変更が無い
+    HEAD がすでに commit なら戻す操作は要らないので、何もせずに成功とする。
+    戻すのは `git reset --hard` ではなく `--keep`。確認から実行までのわずかな間に編集されても、
+    戻すコミットと違うファイルの変更は残り、衝突するファイルがあれば git が中止する（変更を消さない）。
+    """
+    branch = check_branch(branch)
+    commit = check_commit(commit)
+    heads = [head for head in dict.fromkeys(check_commit(item) for item in expected_heads) if head != commit]
+    cases = [f'{commit}) echo "$head"; exit 0;;']
+    if heads:
+        cases.append(f"{'|'.join(heads)}) ;;")
+    cases.append(f'*) echo "$head"; exit {ROLLBACK_EXIT_UNEXPECTED_HEAD};;')
+    script = (
+        f"branch=$(git rev-parse --abbrev-ref HEAD) || exit {ROLLBACK_EXIT_UNREADABLE}; "
+        f"head=$(git rev-parse HEAD) || exit {ROLLBACK_EXIT_UNREADABLE}; "
+        f'[ "$branch" = {shlex.quote(branch)} ] || {{ echo "$branch"; exit {ROLLBACK_EXIT_BRANCH_CHANGED}; }}; '
+        f'case "$head" in {" ".join(cases)} esac; '
+        f"changes=$(git status --porcelain --untracked-files=no) || exit {ROLLBACK_EXIT_UNREADABLE}; "
+        f'[ -z "$changes" ] || {{ printf \'%s\\n\' "$changes" | wc -l; exit {ROLLBACK_EXIT_TREE_CHANGED}; }}; '
+        f"git reset --keep {commit} && git rev-parse HEAD"
+    )
+    return _in_bot_dir(bot_dir, f"sh -c {shlex.quote(script)}")
 
 
 def journal_since_command(service: str, since: int, *, use_sudo: bool) -> str:
