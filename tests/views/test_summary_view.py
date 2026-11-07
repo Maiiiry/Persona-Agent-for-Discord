@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import discord
 from persona_bot.core.app_state import GuildSettings
+from tests.helpers.discord_mocks import make_interaction, make_response
 from tests.helpers.persona_helpers import install_persona_catalog
 from persona_bot.services import summary_service
 from persona_bot.views import summary_view
@@ -41,10 +42,9 @@ class RunSummaryFailureTests(unittest.IsolatedAsyncioTestCase):
         self.view = SummaryView(GuildSettings(), None, None, None, None)
         self.addCleanup(self.view.stop)
         self.button = next(item for item in self.view.children if isinstance(item, RunSummaryButton))
-        self.interaction = SimpleNamespace(
+        self.interaction = make_interaction(
             channel=object(), client=SimpleNamespace(user=object()),
-            response=SimpleNamespace(edit_message=AsyncMock()),
-            edit_original_response=AsyncMock(), followup=SimpleNamespace(send=AsyncMock()),
+            response=make_response("edit_message"), without=("original_response",),
         )
 
     def last_panel(self) -> str:

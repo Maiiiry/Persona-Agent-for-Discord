@@ -27,19 +27,15 @@ from persona_bot.views.auto_topic_view import (
 )
 from persona_bot.views.settings_view import ConfirmButton, ModelSelect, PersonaSelect, RespondModeSelect, SettingsView
 from persona_bot.views.unblock_view import UnblockSelect, UnblockView
+from tests.helpers.discord_mocks import make_interaction as make_discord_interaction
 from tests.helpers.persona_helpers import install_persona_catalog
 from tests.helpers.member_helpers import make_member, make_owner_client
 
 
 def make_interaction(*, admin: bool = True) -> SimpleNamespace:
-    return SimpleNamespace(
-        user=make_member(admin=admin),
-        guild=SimpleNamespace(id=1),
-        client=make_owner_client(),
-        response=SimpleNamespace(
-            defer=AsyncMock(), edit_message=AsyncMock(), send_message=AsyncMock(), is_done=Mock(return_value=False),
-        ),
-        edit_original_response=AsyncMock(),
+    return make_discord_interaction(
+        user=make_member(admin=admin), guild=SimpleNamespace(id=1), client=make_owner_client(),
+        without=("followup", "original_response"),
     )
 
 

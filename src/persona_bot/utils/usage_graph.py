@@ -78,7 +78,9 @@ class UsageTracker:
         return await run_in_thread(self._render_graph_buffer, *snapshot)
 
     @serialized_plot
-    def _render_graph_buffer(self, input_tokens, output_tokens, total_tokens) -> io.BytesIO:
+    def _render_graph_buffer(
+        self, input_tokens: list[int], output_tokens: list[int], total_tokens: list[int],
+    ) -> io.BytesIO:
         with plt.rc_context(graph_font_context()):
             figure, axis = plt.subplots(figsize=(10, 6))
             x = np.arange(1, len(total_tokens) + 1)

@@ -4,11 +4,12 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import discord
+from tests.helpers.discord_mocks import ONLY_RESPONSE, make_interaction as make_discord_interaction, make_response
 from persona_bot.services.voice_conversation import ConsentState
 from persona_bot.views.voice_consent_view import VoiceConsentView, build_consent_panel_text
 
@@ -37,10 +38,7 @@ class FakeConversation:
 
 
 def make_interaction(user_id=11):
-    return SimpleNamespace(
-        user=SimpleNamespace(id=user_id),
-        response=SimpleNamespace(send_message=AsyncMock()),
-    )
+    return make_discord_interaction(user_id=user_id, response=make_response("send_message"), without=ONLY_RESPONSE)
 
 
 class PanelTextTests(unittest.TestCase):

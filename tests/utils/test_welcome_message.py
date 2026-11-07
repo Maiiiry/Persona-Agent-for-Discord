@@ -4,27 +4,28 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import discord
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from tests.helpers.discord_mocks import make_channel as make_text_channel, make_guild as make_server
 from persona_bot.utils import discord_helpers
 from persona_bot.utils.discord_helpers import pick_announcement_channel, post_welcome_message
 
 
 def make_channel(channel_id: int, *, view: bool = True, send: bool = True) -> SimpleNamespace:
-    return SimpleNamespace(
-        id=channel_id,
+    return make_text_channel(
+        channel_id=channel_id,
         permissions_for=lambda member: SimpleNamespace(view_channel=view, send_messages=send),
-        send=AsyncMock(),
     )
 
 
 def make_guild() -> SimpleNamespace:
     channel = make_channel(2)
-    return SimpleNamespace(id=1, me=object(), system_channel=channel, text_channels=[channel])
+    return make_server(me=object(), system_channel=channel, text_channels=[channel])
 
 
 class AnnouncementChannelTests(unittest.TestCase):

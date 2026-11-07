@@ -1,5 +1,11 @@
 # 回帰テスト
 
+## テスト用Discordモックの共通化（#378）
+
+`helpers/discord_mocks.py` が、`Interaction`・`Message`・`Channel`・`Guild` の架空オブジェクトを作る（`make_interaction`・`make_response`・`make_followup`・`make_message`・`make_channel`・`make_guild`）。送信・応答は呼ぶたびに新しい`AsyncMock`なので、テスト間で呼び出し履歴が混ざらない。
+
+既存のテストには、`response` に `defer` しか持たせず「余計なメソッドを呼ぶと`AttributeError`で落ちる」ことを期待したものがあるため、既定の全部入りのほかに、`make_response("defer")` で持たせるメソッドを絞り、`without=ONLY_RESPONSE` で`followup`などを外せる。`user`は省略すると属性ごと持たない（`user_id`だけ渡せば`SimpleNamespace(id=...)`）。追加・上書きしたい属性は`**attributes`で渡す。`utils/test_discord_mocks.py` が既定値・厳密さ・独立性・上書きを確かめる。新しいテストはまずここを使い、移行は既存の挙動を確かめながら1ファイルずつ進める（現在は `test_shared_helpers`・`test_summary_view`・`test_agent_view`・`test_storage_failure_notices`・`test_panel_confirmations`・`test_voice_consent_view`・`test_welcome_message` が使用）。
+
 ## 接続切替・音声会話終了の待機中の再開（#344・#345）
 
 `tools/console/frontend/tests/connection.test.mjs` は実際の`DataPage`と`DbTableDetail`を読み込み、ReactフックとAPIを差し替え、接続切替時に子のeffectを親より先に実行する。新接続で選ぶ前の内容取得がないこと、閉じるアニメーション用の中身も引き継がないこと、選択後のページング・行展開・伏せ字を確認する。
@@ -36,7 +42,7 @@ tests/
 ├── utils/        # 保存・JSON解析・グラフなどの共通処理
 ├── deploy/       # 運用・移行スクリプト
 ├── integration/  # 起動配線・SDK移行・非同期I/O
-└── helpers/      # テスト間で共有する補助処理
+└── helpers/      # テスト間で共有する補助処理（Discordの架空のInteraction・Message・Channel・Guildは `discord_mocks.py`）
 ```
 
 表内のテストパスは `tests/` からの相対パスで表す。一括実行のコマンドは従来どおり。各フォルダの `__init__.py` により、Python 3.10／3.13の `unittest discover` がサブフォルダも検出する。分類だけ、モジュールだけ、ファイルの直接実行も選べる。
@@ -50,6 +56,8 @@ python -B tests/core/test_bot_reply_settings.py -v
 外部サービスはモック、DB・JSONは一時ディレクトリを使う。実際の設定・会話・記憶は読み込まない。メッセージ処理は `MessageHandler` を直接呼び、`bot.py` の起動処理やAST抽出は使わない。時刻集計の日本時間は標準ライブラリの固定オフセットで再現し、タイムゾーンDB欠落時のUTC代用も別途検証する。
 
 `utils/test_timeutil.py`は、別プロセスでOSのタイムゾーンDBを無効にし、依存の`tzdata`で`Asia/Tokyo`を解決できることを確認する。UTCから日本時間への9時間の変換と日付境界を検証し、WindowsだけでなくLinuxのCIでもOSのDBに依存した見逃しを防ぐ。
+
+同じファイルは `utc_now`・`utc_now_iso`・`parse_iso_datetime`・`as_utc`・`format_weekday`・`resolve_timezone` の単体テストも持つ（#378）。現在時刻を固定して秒への切り捨てと保存用文字列の桁数を確かめ、末尾`Z`・オフセット・うるう日・年またぎ・曜日の日付境界、タイムゾーン未設定の旧値のUTC扱い、不正な文字列と未知のタイムゾーン名のフォールバック（名前をログへ出さない）を検証する。
 
 Windows・Python 3.13.3・tzdata 2026.5で全706件が成功。全158 Pythonファイルの構文・Python 3.10文法・compileall、XML・メッセージ分割・`pip check`も成功した。Linux／Python 3.10での実行と実サービス接続は未確認。
 
@@ -467,6 +475,7 @@ Windows・Python 3.13.3でボット672件・コンソールバックエンド158
 | views | [test_summary_view.py](views/test_summary_view.py) |
 | views | [test_view_parts.py](views/test_view_parts.py) |
 | utils | [test_logging_setup.py](utils/test_logging_setup.py) |
+| utils | [test_discord_mocks.py](utils/test_discord_mocks.py) |
 | utils | [test_graph_fonts.py](utils/test_graph_fonts.py) |
 | utils | [test_image_attachments.py](utils/test_image_attachments.py) |
 | utils | [test_json_extraction.py](utils/test_json_extraction.py) |

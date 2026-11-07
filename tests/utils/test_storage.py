@@ -176,7 +176,9 @@ class JsonStorageTests(unittest.TestCase):
                 self.assertEqual(backup.read_bytes(), broken)
                 self.assertFalse(self.path.exists())
                 log_text = "\n".join(LOG_FORMATTER.format(record) for record in logs.records)
-                self.assertIn("<PATH>", log_text)
+                # どのファイルが壊れたかは内部ファイルの名前だけで分かる。絶対パスと退避先の名前は出さない。
+                self.assertIn(f"({self.path.name})", log_text)
+                self.assertNotIn("<PATH>", log_text)
                 self.assertNotIn(backup.name, log_text)
                 self.assertNotIn(str(self.root), log_text)
                 write_json_file(self.path, loaded)
@@ -186,9 +188,12 @@ class JsonStorageTests(unittest.TestCase):
         broken = b'{"users": '
         self.path.write_bytes(broken)
         with patch("os.replace", side_effect=PermissionError("架空の退避失敗")):
-            with self.assertLogs("persona_bot.utils.storage", level="ERROR"):
+            with self.assertLogs("persona_bot.utils.storage", level="ERROR") as logs:
                 with self.assertRaises(PermissionError):
                     load_json_file(self.path, {"users": {}})
+        log_text = "\n".join(LOG_FORMATTER.format(record) for record in logs.records)
+        self.assertIn(f"({self.path.name})", log_text)
+        self.assertNotIn(str(self.root), log_text)
         self.assertEqual(self.path.read_bytes(), broken)
         self.assertEqual(list(self.root.iterdir()), [self.path])
 

@@ -8,9 +8,11 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import discord
 
+from tests.helpers.discord_mocks import ONLY_RESPONSE, make_interaction, make_response
 from persona_bot.config.constants import AGENT_DEFAULT_LINES
 from persona_bot.core.background import TaskOwner, spawn
 from persona_bot.services.agent_plan import AgentPlan
@@ -285,9 +287,8 @@ class CancelButtonTests(unittest.IsolatedAsyncioTestCase):
         button = view.children[0]
 
         def interaction(user_id):
-            return SimpleNamespace(
-                user=SimpleNamespace(id=user_id),
-                response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock()),
+            return make_interaction(
+                user_id=user_id, response=make_response("send_message", "defer"), without=ONLY_RESPONSE,
             )
 
         other = interaction(12)
@@ -308,10 +309,10 @@ class CancelButtonTests(unittest.IsolatedAsyncioTestCase):
                 view = agent_view.AgentCancelView(11, event)
                 self.addCleanup(view.stop)
                 error = discord.HTTPException(SimpleNamespace(status=400, reason="Bad Request"), "架空の送信失敗")
-                interaction = SimpleNamespace(
-                    user=SimpleNamespace(id=user_id),
-                    response=SimpleNamespace(
-                        send_message=AsyncMock(side_effect=error), defer=AsyncMock(side_effect=error),
+                interaction = make_interaction(
+                    user_id=user_id, without=ONLY_RESPONSE,
+                    response=make_response(
+                        "send_message", "defer", send_message=AsyncMock(side_effect=error), defer=AsyncMock(side_effect=error),
                     ),
                 )
                 with self.assertLogs("persona_bot.views.agent_view", level="WARNING") as logs:
@@ -335,7 +336,9 @@ class CancelButtonTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 cleaned.set()
 
-        interaction = SimpleNamespace(user=SimpleNamespace(id=11), response=SimpleNamespace(defer=AsyncMock(side_effect=defer)))
+        interaction = make_interaction(
+            user_id=11, without=ONLY_RESPONSE, response=make_response("defer", defer=AsyncMock(side_effect=defer)),
+        )
         callback = asyncio.create_task(view.children[0].callback(interaction))
         try:
             await asyncio.wait_for(started.wait(), 2)
@@ -354,7 +357,7 @@ class CancelButtonTests(unittest.IsolatedAsyncioTestCase):
             view = agent_view.AgentCancelView(11, event)
         self.addCleanup(view.stop)
         owner.stopping = True
-        interaction = SimpleNamespace(user=SimpleNamespace(id=11), response=SimpleNamespace(defer=AsyncMock()))
+        interaction = make_interaction(user_id=11, without=ONLY_RESPONSE, response=make_response("defer"))
         with self.assertRaises(asyncio.CancelledError):
             await view.children[0].callback(interaction)
         self.assertFalse(event.is_set())
