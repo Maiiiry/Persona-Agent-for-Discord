@@ -130,6 +130,33 @@ class FakeRepo:
         sha, subject = self.history[self.head_index]
         return f"{self.branch}\n{sha[:7]}\x1f{subject}\x1f2026-10-16T21:14:05+09:00\nver0.1.7-12-g{sha[:7]}\n{self.dirty}\n"
 
+    def respond_rollback(self, command: str) -> tuple[str, str, int] | None:
+        """remote_commands.deploy_rollback_command（sh -c '…'）の意味をなぞる。
+
+        戻す直前にブランチ・HEAD・追跡ファイルの変更を確かめ、想定と違えば何も変えずに止まる（終了コード 10・11・12）。
+        本物の git での挙動は test_deploy.RollbackCommandRealGitTests が確かめている。
+        """
+        script = shlex.split(command)[2]
+        branch = re.search(r'\[ "\$branch" = (\S+) \]', script)
+        reset = re.search(r"git reset --keep ([0-9a-f]{40}) && git rev-parse HEAD$", script)
+        cases = re.search(r'case "\$head" in (.*) esac', script)
+        if not (branch and reset and cases):
+            return None
+        commit = reset.group(1)
+        allowed = set(re.findall(r"[0-9a-f]{40}", cases.group(1)))
+        if self.branch != shlex.split(branch.group(1))[0]:
+            return f"{self.branch}\n", "", 10
+        if self.head == commit:
+            return f"{self.head}\n", "", 0
+        if self.head not in allowed:
+            return f"{self.head}\n", "", 11
+        if self.dirty:
+            return f"{self.dirty}\n", "", 12
+        if self.reset_fails:
+            return "", "fatal: Unable to create '.git/index.lock': File exists.\n", 128
+        self.head_index = self.index_of(commit)
+        return f"{self.head}\n", "", 0
+
     def respond(self, command: str) -> tuple[str, str, int] | None:
         """「cd <ボットのフォルダ> && ...」の後ろの git / pip のコマンドに答える。知らないコマンドなら None。"""
         self.commands.append(command)
@@ -174,11 +201,8 @@ class FakeRepo:
             return "Successfully installed example-package-1.2.3\n", "", 0
         if re.fullmatch(r"\S+ -m pip check", command):
             return "No broken requirements found.\n", "", 0
-        if match := re.fullmatch(r"git reset --hard ([0-9a-f]{40}) && git rev-parse HEAD", command):
-            if self.reset_fails:
-                return "", "fatal: Unable to create '.git/index.lock': File exists.\n", 128
-            self.head_index = self.index_of(match.group(1))
-            return f"HEAD is now at {self.head[:7]} {self.history[self.head_index][1]}\n{self.head}\n", "", 0
+        if command.startswith("sh -c "):
+            return self.respond_rollback(command)
         if command.startswith("git rev-parse --abbrev-ref HEAD && git log -1"):
             return self.status_output(), "", 0
         return None

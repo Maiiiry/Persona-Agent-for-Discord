@@ -4,10 +4,15 @@
 チェックが1つでも通らなければ、そのステップを失敗として止める（次のステップへ進まない）。
 
 途中（依存の更新・再起動・ヘルスチェック）で失敗したら、自動で前の版へ戻す（利用者の指定）:
-  コードを戻す（git reset --hard デプロイ前のコミット）→ 依存関係を戻す（変えていたら）→ 再起動 → ヘルスチェック
+  コードを戻す（git reset --keep デプロイ前のコミット）→ 依存関係を戻す（変えていたら）→ 再起動 → ヘルスチェック
 
-★ 事前確認で「サーバーに未コミットの変更が無い」ことを必ず確かめること。巻き戻しの git reset --hard は
-  未コミットの変更を消してしまうため、変更があるサーバーではデプロイ自体を始めない。
+★ 事前確認で「サーバーに未コミットの変更が無い」ことを必ず確かめること。変更があるサーバーでは、
+  デプロイ中の編集と見分けがつかず、巻き戻しの前提（変更が無いこと）を確かめられないため、デプロイ自体を始めない。
+★ 巻き戻しは git reset --hard を使わない（#381）。事前確認の後に、サーバーで別の操作（手動の編集・ブランチの切り替え・
+  コミット）が行われうるため、戻す直前に remote_commands.deploy_rollback_command が1回の遠隔コマンドの中で
+  「ブランチが想定どおり」「HEAD がデプロイ前か取り込み後」「追跡ファイルに変更なし」を確かめ、外れていたら
+  何も変更せずに止まる（rollback_failed。変更は消さず、安全な復旧手順を案内する）。確認の後に編集されても、
+  git reset --keep が衝突するファイルを守って中止する。
 ★ bot.db は戻さない。新しい版がスキーマを上げていても、ボットの移行は列や表を足すだけなので、前の版は
   知らない列・表を読まないだけで動く（戻すと、デプロイ後に保存された会話の記憶などを失う）。
 ★ 実行するコマンドは remote_commands.py のホワイトリストで組み立てたものだけ。
@@ -50,7 +55,10 @@ DEPLOY_STEPS = (
     ("health", "ヘルスチェック", "「ログイン成功」のログが出て、落ちずに動いていることを確かめる"),
 )
 ROLLBACK_STEPS = (
-    ("rollback_code", "コードを戻す", "git reset --hard でデプロイ前のコミットへ戻す（取り込んだコミットは GitHub に残る）"),
+    (
+        "rollback_code", "コードを戻す",
+        "ブランチ・コミット・未コミットの変更が想定どおりか確かめ、git reset --keep でデプロイ前のコミットへ戻す（取り込んだコミットは GitHub に残る）",
+    ),
     ("rollback_deps", "依存関係を戻す", "依存関係を入れ直していたら、前の requirements.txt・constraints.txt で入れ直す"),
     ("rollback_restart", "再起動", "前の版で起動し直し、PID が変わったことを確かめる"),
     ("rollback_health", "ヘルスチェック", "前の版で「ログイン成功」まで戻ったことを確かめる"),
@@ -141,6 +149,8 @@ class DeployRunner:
         self._deps_changed = False
         self._restart_attempted = False
         self._rollback_started = False
+        # 巻き戻しが、サーバーの状態が想定と違うために何も変えずに止まった理由（画面と手動の案内に使う）
+        self._rollback_refusal: str | None = None
         # 直前の再起動の時刻（サーバーの UNIX 秒）と、そのときの自動再起動の回数。ヘルスチェックが使う
         self._since = 0
         self._restarts_after: int | None = None
@@ -328,7 +338,7 @@ class DeployRunner:
             "サーバーに未コミットの変更が無い",
             dirty_count == 0,
             f"{dirty_count} 件" if dirty_count >= 0 else f"読めない出力: {dirty}",
-            "サーバーのボットのフォルダに未コミットの変更があります。巻き戻しで消してしまうため、デプロイしません"
+            "サーバーのボットのフォルダに未コミットの変更があります。失敗時に安全に巻き戻せなくなるため、デプロイしません"
             "（サーバーで git status を確かめ、変更を片付けてからデプロイしてください）。",
         )
 
@@ -595,9 +605,42 @@ class DeployRunner:
         else:
             self._finish_rollback_failed()
 
+    def _rollback_expected_heads(self) -> list[str]:
+        """巻き戻しの前に HEAD として現れてよい、デプロイ前以外のコミット（取り込み先と取り込み後）。
+
+        これ以外のコミットに HEAD があるなら、デプロイの外で動かされたので、その参照は書き換えない。
+        """
+        return [commit for commit in (self.record.after_commit, self.record.target_commit) if commit]
+
+    def _rollback_refusal_reason(self, result: CommandResult) -> str | None:
+        """巻き戻しコマンドが、サーバーの状態が想定と違うためコードに触れずに止まったなら、その理由を返す。"""
+        observed = (result.stdout.strip().splitlines() or [""])[0][:100]
+        branch = self.profile.deploy_branch
+        status = result.exit_status
+        if status == rc.ROLLBACK_EXIT_BRANCH_CHANGED:
+            return f"デプロイ中にサーバーのブランチが {branch} から {observed or '不明'} に変わっていました。"
+        if status == rc.ROLLBACK_EXIT_UNEXPECTED_HEAD:
+            return f"デプロイ中にサーバーのコミットが、デプロイ前でも取り込み後でもない {_short(observed)} に動いていました。"
+        if status == rc.ROLLBACK_EXIT_TREE_CHANGED:
+            detail = f"（{observed} 件）" if observed.isdigit() else ""
+            return f"デプロイ中にサーバーの追跡ファイルが変更されていました{detail}。"
+        if status == rc.ROLLBACK_EXIT_UNREADABLE:
+            return "巻き戻しの前に、サーバーのブランチ・コミット・変更の有無を読めませんでした。"
+        return None
+
     async def _rollback_code(self, step: Step) -> None:
         before = self.record.before_commit or ""
-        result = await self._run(step, rc.deploy_reset_command(self.profile.bot_dir, before), label="コードを戻す")
+        result = await self._run(
+            step,
+            rc.deploy_rollback_command(self.profile.bot_dir, self.profile.deploy_branch, before, self._rollback_expected_heads()),
+            label="コードを戻す",
+        )
+        reason = self._rollback_refusal_reason(result)
+        if reason is not None:
+            # 何も変えずに止まった。変更や別のブランチを巻き込まないよう、ここで巻き戻しを打ち切る。
+            self._rollback_refusal = reason
+            step.checks.append(Check("巻き戻しの前提（ブランチ・コミット・未コミットの変更）が変わっていない", False, reason))
+            raise StepFailed(f"安全のため巻き戻しを中止しました。{reason}サーバーのコードと変更には触れていません。")
         head = _last_line(result.stdout)
         self._check(
             step,
@@ -617,11 +660,26 @@ class DeployRunner:
 
     def _finish_rollback_failed(self) -> None:
         bot_dir, service = self.profile.bot_dir, self.profile.service
+        branch, before = self.profile.deploy_branch, self.record.before_commit
+        restart = (
+            f"依存関係を入れ直してから sudo systemctl restart {service} で起動し、"
+            f"journalctl -u {service} -n 50 で「{rc.LOGIN_SUCCESS_TEXT}」を確かめてください。"
+        )
+        # --keep は未コミットの変更を消さず、戻すコミットと衝突するファイルがあれば中止する（--hard は使わない）。
+        keep = "（--keep は未コミットの変更を消さず、衝突するときは中止します）"
+        if self._rollback_refusal is not None:
+            self._finish(
+                "rollback_failed",
+                f"安全のため巻き戻しを中止しました。{self._rollback_refusal}"
+                "サーバーのコード・ブランチ・未コミットの変更には何も手を加えていません。サーバーで手動の対応が必要です: "
+                f"cd {bot_dir} && git status && git log -3 で今の状態を確かめ、変更を片付けてから、"
+                f"ボットのコードを {before} に戻す必要があれば git switch {branch} && git reset --keep {before} を実行し{keep}、{restart}",
+            )
+            return
         self._finish(
             "rollback_failed",
             "巻き戻しにも失敗しました。サーバーで手動の対応が必要です: "
-            f"cd {bot_dir} && git reset --hard {self.record.before_commit} を実行し、依存関係を入れ直してから "
-            f"sudo systemctl restart {service} で起動し、journalctl -u {service} -n 50 で「{rc.LOGIN_SUCCESS_TEXT}」を確かめてください。",
+            f"cd {bot_dir} && git reset --keep {before} を実行し{keep}、{restart}",
         )
 
 

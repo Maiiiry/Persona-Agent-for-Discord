@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -497,8 +499,96 @@ class DeployTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [statuses[key] for key in ("rollback_deps", "rollback_restart", "rollback_health")], ["skipped"] * 3
         )
-        self.assertIn(f"git reset --hard {record.before_commit}", record.message)
+        self.assertIn(f"git reset --keep {record.before_commit}", record.message)
         self.assertIn("手動", record.message)
+
+    # ------------------------------------------------------------ 巻き戻しの前に、サーバーが変わっていた（#381）
+
+    async def deploy_with_external_change(self, change):
+        """依存関係の更新が失敗して巻き戻しに入る直前に、サーバーで別の操作（change）が行われた状況を作る。"""
+        self.repo.requirements_changed_at = {3}
+        self.repo.pip_fails_at = {self.repo.origin}
+        original = self.session.run
+        changed = False
+
+        async def run(command, **kwargs):
+            nonlocal changed
+            result = await original(command, **kwargs)
+            if "-m pip install" in command and not changed:
+                changed = True
+                change()
+            return result
+
+        record = new_record(1, self.profile)
+        with patch.object(self.session, "run", side_effect=run):
+            await DeployRunner(self.session, self.profile, record, **FAST).run()
+        return record
+
+    def assert_rollback_stopped_safely(self, record):
+        """巻き戻しを中止し、コードにも再起動にも触れず、画面に手動の安全な手順を出している。"""
+        self.assertEqual(record.status, "rollback_failed", record.message)
+        statuses = self.statuses(record)
+        self.assertEqual(statuses["rollback_code"], "failed")
+        self.assertEqual([statuses[key] for key in ("rollback_deps", "rollback_restart", "rollback_health")], ["skipped"] * 3)
+        self.assertEqual(self.sent("systemctl restart"), [])
+        self.assertIn("中止", record.message)
+        self.assertIn("何も手を加えていません", record.message)
+        self.assertIn(f"git reset --keep {record.before_commit}", record.message)
+        self.assertNotIn("--hard", record.message)
+        self.assertFalse(self.step(record, "rollback_code").checks[-1].ok)
+
+    async def test_rollback_keeps_tracked_edits_made_during_deploy(self):
+        origin = self.repo.origin
+        record = await self.deploy_with_external_change(lambda: setattr(self.repo, "dirty", 2))
+        self.assert_rollback_stopped_safely(record)
+        self.assertEqual(self.repo.head, origin)  # 戻していない
+        self.assertEqual(self.repo.dirty, 2)  # 編集は消えていない
+        self.assertIn("2 件", record.message)
+        self.assertIn("追跡ファイル", self.step(record, "rollback_code").message)
+
+    async def test_rollback_does_not_move_a_branch_switched_during_deploy(self):
+        record = await self.deploy_with_external_change(lambda: setattr(self.repo, "branch", "hotfix"))
+        self.assert_rollback_stopped_safely(record)
+        self.assertEqual(self.repo.head, self.repo.origin)
+        self.assertEqual(self.repo.branch, "hotfix")
+        self.assertIn("hotfix", record.message)
+        self.assertIn("git switch main", record.message)
+
+    async def test_rollback_does_not_rewrite_an_unexpected_head(self):
+        # デプロイ前は 1、取り込み後は 3。その間の 2 は、デプロイの外で動かされたコミット
+        record = await self.deploy_with_external_change(lambda: setattr(self.repo, "head_index", 2))
+        self.assert_rollback_stopped_safely(record)
+        self.assertEqual(self.repo.head_index, 2)
+
+    async def test_rollback_that_cannot_read_server_state_stops_without_changes(self):
+        original = self.session.run
+        self.repo.requirements_changed_at = {3}
+        self.repo.pip_fails_at = {self.repo.origin}
+
+        async def run(command, **kwargs):
+            if command.startswith("cd ") and "git reset --keep" in command:
+                return CommandResult("", "fatal: not a git repository", rc.ROLLBACK_EXIT_UNREADABLE, 1)
+            return await original(command, **kwargs)
+
+        record = new_record(1, self.profile)
+        with patch.object(self.session, "run", side_effect=run):
+            await DeployRunner(self.session, self.profile, record, **FAST).run()
+        self.assert_rollback_stopped_safely(record)
+        self.assertEqual(self.repo.head, self.repo.origin)
+        self.assertIn("読めませんでした", record.message)
+
+    async def test_ordinary_failure_still_rolls_back_with_a_guarded_keep_reset(self):
+        before = self.repo.head
+        self.repo.requirements_changed_at = {3}
+        self.repo.pip_fails_at = {self.repo.origin}
+        record = await self.deploy()
+        self.assertEqual(record.status, "rolled_back", record.message)
+        self.assertEqual(self.repo.head, before)
+        commands = self.step(record, "rollback_code").commands
+        self.assertEqual(len(commands), 1)
+        self.assertIn("git reset --keep", commands[0])
+        self.assertNotIn("--hard", commands[0])
+        self.assertEqual(self.sent("--hard"), [])
 
     # ------------------------------------------------------------ 同時に1つだけ
 
@@ -620,7 +710,7 @@ class DeployTest(unittest.IsolatedAsyncioTestCase):
         self.repo.requirements_changed_at = {3}
         self.repo.pip_fails_at = {self.repo.origin}
         manager = DeployManager()
-        async with self.hold_command("git reset --hard") as gate:
+        async with self.hold_command("git reset --keep") as gate:
             record = manager.start(self.session, self.profile, **FAST)
             try:
                 await asyncio.wait_for(gate.started.wait(), timeout=5)
@@ -636,7 +726,7 @@ class DeployTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.repo.head, before)
         keys = [step.key for step in record.steps]
         self.assertEqual(len(keys), len(set(keys)))
-        self.assertEqual(len(self.sent("git reset --hard")), 1)
+        self.assertEqual(len(self.sent("git reset --keep")), 1)
 
     async def test_canceled_rollback_exception_finishes_record_and_notifies(self):
         """中断後の巻き戻しが例外でも失敗を確定し、通知・排他解放後にキャンセルを伝える。"""
@@ -754,13 +844,141 @@ class DeployTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.status, "succeeded")
 
 
+@unittest.skipUnless(shutil.which("git") and shutil.which("sh"), "git と sh が必要です")
+class RollbackCommandRealGitTests(unittest.TestCase):
+    """巻き戻しのコマンドを、隔離した一時リポジトリの本物の git・sh で実行して確かめる（#381）。
+
+    模擬サーバーは文字列の一致で答えるだけなので、「途中の編集を消さない」「別のブランチを動かさない」は
+    ここで本物のGitに対して確かめる。サーバー・実リポジトリには触れない。
+    """
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.repo = self.root / "bot"
+        self.repo.mkdir()
+        self.git("init", "-q")
+        self.git("symbolic-ref", "HEAD", "refs/heads/main")
+        for key, value in (("core.autocrlf", "false"), ("commit.gpgsign", "false")):
+            self.git("config", key, value)
+        self.write("a.txt", "a1\n")
+        self.write("b.txt", "b1\n")
+        self.git("add", ".")
+        self.git("commit", "-q", "-m", "c1")
+        self.before = self.git("rev-parse", "HEAD")
+        self.write("a.txt", "a2\n")
+        self.git("commit", "-q", "-am", "c2")
+        self.after = self.git("rev-parse", "HEAD")
+
+    def git(self, *args: str) -> str:
+        result = subprocess.run(
+            ["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid", *args],
+            cwd=self.repo, capture_output=True, text=True, check=True,
+        )
+        return result.stdout.strip()
+
+    def write(self, name: str, text: str) -> None:
+        (self.repo / name).write_text(text, encoding="utf-8", newline="\n")
+
+    def read(self, name: str) -> str:
+        return (self.repo / name).read_text(encoding="utf-8")
+
+    def rollback(self, *, branch: str = "main", env: dict | None = None):
+        command = rc.deploy_rollback_command(self.repo.as_posix(), branch, self.before, [self.after])
+        result = subprocess.run(["sh", "-c", command], capture_output=True, text=True, env=env)
+        return result.returncode, result.stdout.strip()
+
+    def test_clean_tree_is_rolled_back_to_the_previous_commit(self) -> None:
+        self.assertEqual(self.rollback(), (0, self.before))
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.before)
+        self.assertEqual(self.read("a.txt"), "a1\n")
+
+    def test_edit_made_during_deploy_is_kept_and_nothing_is_reset(self) -> None:
+        self.write("b.txt", "手元の編集\n")
+        self.assertEqual(self.rollback(), (rc.ROLLBACK_EXIT_TREE_CHANGED, "1"))
+        self.assertEqual(self.read("b.txt"), "手元の編集\n")
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.after)
+
+    def test_staged_edit_during_deploy_is_kept(self) -> None:
+        self.write("b.txt", "ステージ済みの編集\n")
+        self.git("add", "b.txt")
+        self.assertEqual(self.rollback()[0], rc.ROLLBACK_EXIT_TREE_CHANGED)
+        self.assertEqual(self.read("b.txt"), "ステージ済みの編集\n")
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.after)
+
+    def test_other_branch_is_not_moved(self) -> None:
+        self.git("switch", "-q", "-c", "other")
+        self.write("o.txt", "other\n")
+        self.git("add", ".")
+        self.git("commit", "-q", "-m", "別ブランチの作業")
+        other = self.git("rev-parse", "HEAD")
+        self.assertEqual(self.rollback(), (rc.ROLLBACK_EXIT_BRANCH_CHANGED, "other"))
+        self.assertEqual(self.git("rev-parse", "HEAD"), other)
+        self.assertEqual(self.read("o.txt"), "other\n")
+        self.assertEqual(self.git("rev-parse", "main"), self.after)
+
+    def test_detached_head_is_not_rewritten(self) -> None:
+        self.git("checkout", "-q", "--detach")
+        self.assertEqual(self.rollback(), (rc.ROLLBACK_EXIT_BRANCH_CHANGED, "HEAD"))
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.after)
+
+    def test_unexpected_head_is_not_rewritten(self) -> None:
+        self.write("c.txt", "c\n")
+        self.git("add", ".")
+        self.git("commit", "-q", "-m", "デプロイの外で進んだコミット")
+        moved = self.git("rev-parse", "HEAD")
+        self.assertEqual(self.rollback(), (rc.ROLLBACK_EXIT_UNEXPECTED_HEAD, moved))
+        self.assertEqual(self.git("rev-parse", "HEAD"), moved)
+
+    def test_already_at_previous_commit_does_nothing_and_keeps_edits(self) -> None:
+        self.git("reset", "-q", "--hard", self.before)
+        self.write("b.txt", "手元の編集\n")
+        self.assertEqual(self.rollback(), (0, self.before))
+        self.assertEqual(self.read("b.txt"), "手元の編集\n")
+
+    def test_not_a_git_repository_stops_with_unreadable_state(self) -> None:
+        command = rc.deploy_rollback_command(self.root.as_posix(), "main", self.before, [self.after])
+        result = subprocess.run(["sh", "-c", command], capture_output=True, text=True)
+        self.assertEqual(result.returncode, rc.ROLLBACK_EXIT_UNREADABLE)
+
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "PATH の先頭に置いた偽の git を sh が選ばない環境がある（Windows の CI で確認）。Linux で確かめる",
+    )
+    def test_edit_after_the_check_is_protected_by_git_itself(self) -> None:
+        """確認の直後、戻す直前に編集されても（競合）、git reset --keep がその編集を守って中止する。"""
+        wrapper = self.root / "wrapper"
+        wrapper.mkdir()
+        script = wrapper / "git"
+        # git reset の直前に、戻すコミットで内容が変わるファイル（a.txt）を編集してから、本物の git を呼ぶ
+        script.write_text(
+            '#!/bin/sh\nif [ "$1" = "reset" ]; then printf "競合する編集\\n" > a.txt; fi\n'
+            f'exec "{Path(shutil.which("git")).as_posix()}" "$@"\n',
+            encoding="utf-8", newline="\n",
+        )
+        script.chmod(0o755)
+        env = {**os.environ, "PATH": f"{wrapper.as_posix()}{os.pathsep}{os.environ['PATH']}"}
+        code, _ = self.rollback(env=env)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.read("a.txt"), "競合する編集\n")
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.after)
+
+
 class DeployCommandTests(unittest.TestCase):
     def test_rejects_unsafe_values(self) -> None:
         for branch in ("main; rm -rf /", "--upload-pack=x", "a..b", "-x"):
             with self.assertRaises(ValueError):
                 rc.deploy_fetch_command("/srv/bot", branch)
-        with self.assertRaises(ValueError):
-            rc.deploy_reset_command("/srv/bot", "HEAD~1")  # コミット ID（40 桁）以外は受け付けない
+        good = "a" * 40
+        for arguments in (
+            ("/srv/bot", "main", "HEAD~1", []),  # コミット ID（40 桁）以外は受け付けない
+            ("/srv/bot", "main", good, ["HEAD~1"]),
+            ("/srv/bot", "main; id", good, []),
+            ("/srv/bot", "--upload-pack=x", good, []),
+        ):
+            with self.subTest(arguments=arguments), self.assertRaises(ValueError):
+                rc.deploy_rollback_command(*arguments)
         with self.assertRaises(ValueError):
             rc.deploy_pip_install_command("/srv/bot", ".venv/bin/python; id")
 
