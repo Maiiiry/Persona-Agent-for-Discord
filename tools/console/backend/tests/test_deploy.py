@@ -942,6 +942,10 @@ class RollbackCommandRealGitTests(unittest.TestCase):
         result = subprocess.run(["sh", "-c", command], capture_output=True, text=True)
         self.assertEqual(result.returncode, rc.ROLLBACK_EXIT_UNREADABLE)
 
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "PATH の先頭に置いた偽の git を sh が選ばない環境がある（Windows の CI で確認）。Linux で確かめる",
+    )
     def test_edit_after_the_check_is_protected_by_git_itself(self) -> None:
         """確認の直後、戻す直前に編集されても（競合）、git reset --keep がその編集を守って中止する。"""
         wrapper = self.root / "wrapper"
