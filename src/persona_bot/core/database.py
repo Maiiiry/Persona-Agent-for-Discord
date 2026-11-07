@@ -450,7 +450,7 @@ class Database:
                         " SELECT ?, key, value FROM profile_legacy_v2",
                         (owner,),
                     )
-                    logger.info(f'データベース: 旧・全体共有プロフィールを user_id=<ID> へ移行しました。')
+                    logger.info('データベース: 旧・全体共有プロフィールを user_id=<ID> へ移行しました。')
                 self._conn.execute("DROP TABLE profile_legacy_v2")
             if owner:
                 cursor = self._conn.execute(

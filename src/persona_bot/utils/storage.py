@@ -23,6 +23,10 @@ def load_json_file(path: Path, default_value: dict[str, Any]) -> dict[str, Any]:
     保存されうる。先頭の BOM は json.loads が拒否し、正しい中身ごと破損扱いで退避して
     記憶を空にしてしまうため、utf-8-sig で読んで BOM だけを吸収する（BOM 無しも同じ結果）。
     書き込みは従来どおり BOM 無しの UTF-8 のまま。
+
+    ★ path は data/ 配下の内部ファイル（projects.json・blacklist.json）だけを渡すこと。
+    障害の切り分けのため、ログには絶対パスを出さずファイル名（path.name）だけを出す。
+    利用者が名付けるファイルを渡すと、そのファイル名が既定ログへ出てしまう。
     """
     try:
         loaded = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -41,9 +45,10 @@ def load_json_file(path: Path, default_value: dict[str, Any]) -> dict[str, Any]:
     try:
         os.replace(path, backup_path)
     except OSError:
-        logger.error(f'JSON読み込みエラー (<PATH>): {reason} 退避できないため処理を中止します。', exc_info=True)
+        logger.error('JSON読み込みエラー (%s): %s 退避できないため処理を中止します。', path.name, reason, exc_info=True)
         raise
-    logger.warning(f'JSON読み込みエラー (<PATH>): {reason} <PATH> へ退避し、既定値で再開します。')
+    # 退避先の名前（日時と乱数を含む）は出さない。同じフォルダの「<元の名前>.corrupt-*.bak」を探す。
+    logger.warning('JSON読み込みエラー (%s): %s 同じフォルダへ退避し、既定値で再開します。', path.name, reason)
     return deepcopy(default_value)
 
 
@@ -77,7 +82,7 @@ def write_json_file(path: Path, data: dict[str, Any]) -> None:
                 temporary_path.unlink(missing_ok=True)
             except OSError:
                 # 後始末の失敗で、書き込みが失敗した本来の例外を隠さない。
-                logger.error(f'JSON一時ファイルの削除に失敗しました (<PATH>)。', exc_info=True)
+                logger.error('JSON一時ファイルの削除に失敗しました (%s)。', path.name, exc_info=True)
 
 
 def _iter_json_objects(text: str) -> Iterator[dict[str, Any]]:

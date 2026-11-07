@@ -209,7 +209,7 @@ def load_persona_catalog(prompts_dir: Path | None = None, settings_path: Path | 
     ordered += sorted(name for name in files if name not in entries)
     for name in entries:
         if name not in files:
-            logger.warning(f'警告: personas.json の「<設定値>」に対応するファイルが prompts/ にありません。')
+            logger.warning('警告: personas.json の「<設定値>」に対応するファイルが prompts/ にありません。')
 
     personas = tuple(_build_persona(name, entries.get(name)) for name in ordered)
     return PersonaCatalog(personas, _resolve_default(settings.get("default"), personas))
@@ -252,7 +252,7 @@ def _scan_persona_files(prompts_dir: Path) -> set[str]:
         if not _is_persona_file_name(name) or not path.is_file():
             continue
         if len(persona_value(name)) > DISCORD_SELECT_VALUE_MAX_LENGTH:
-            logger.warning(f'警告: ペルソナのファイル名が長すぎるため選択肢に出せません（<設定値>）。短い名前に変えてください。')
+            logger.warning('警告: ペルソナのファイル名が長すぎるため選択肢に出せません（<設定値>）。短い名前に変えてください。')
             continue
         names.add(name)
     return names
@@ -280,13 +280,13 @@ def _load_persona_settings(settings_path: Path) -> dict[str, Any]:
 
 def _build_persona(file_name: str, entry: Any) -> Persona:
     if entry is not None and not isinstance(entry, dict):
-        logger.warning(f'警告: personas.json の「<設定値>」はオブジェクト（{{ }}）で書いてください。既定の表示名と声を使います。')
+        logger.warning('警告: personas.json の「<設定値>」はオブジェクト（{ }）で書いてください。既定の表示名と声を使います。')
         entry = {}
     entry = entry or {}
     name = entry.get("name")
     display = " ".join(name.split()) if isinstance(name, str) else ""
     if name is not None and not display:
-        logger.warning(f'警告: personas.json の「<設定値>」の name が空か文字列ではないため、ファイル名を表示名にします。')
+        logger.warning('警告: personas.json の「<設定値>」の name が空か文字列ではないため、ファイル名を表示名にします。')
     return Persona(
         value=persona_value(file_name),
         name=display or Path(file_name).stem,
@@ -301,7 +301,7 @@ def _build_voice(file_name: str, voice: Any) -> dict[str, Any]:
     if voice is None:
         return profile
     if not isinstance(voice, dict):
-        logger.warning(f'警告: personas.json の「<設定値>」の voice はオブジェクト（{{ }}）で書いてください。既定の声を使います。')
+        logger.warning('警告: personas.json の「<設定値>」の voice はオブジェクト（{ }）で書いてください。既定の声を使います。')
         return profile
     for key, value in voice.items():
         if key not in _VOICE_KEYS:
@@ -311,10 +311,10 @@ def _build_voice(file_name: str, voice: Any) -> dict[str, Any]:
             logger.warning(f'警告: personas.json の「<設定値>」の voice.{key} は文字列で書いてください。既定値を使います。')
             continue
         if key == "rate" and not _EDGE_RATE_PATTERN.match(value):
-            logger.warning(f"警告: personas.json の「<設定値>」の rate が不正です（<設定値>）。'+5%' のような形式で指定してください。既定値を使います。")
+            logger.warning("警告: personas.json の「<設定値>」の rate が不正です（<設定値>）。'+5%' のような形式で指定してください。既定値を使います。")
             continue
         if key == "pitch" and not _EDGE_PITCH_PATTERN.match(value):
-            logger.warning(f"警告: personas.json の「<設定値>」の pitch が不正です（<設定値>）。'+10Hz' のような形式で指定してください。既定値を使います。")
+            logger.warning("警告: personas.json の「<設定値>」の pitch が不正です（<設定値>）。'+10Hz' のような形式で指定してください。既定値を使います。")
             continue
         if key == "live_voice" and not _LIVE_VOICE_PATTERN.match(value):
             logger.warning("警告: personas.json の「<設定値>」の live_voice が不正です（<設定値>）。'Kore' のような英字の名前で指定してください。既定の声を使います。")
@@ -332,7 +332,7 @@ def _build_agent_lines(file_name: str, agent: Any) -> dict[str, str]:
     if agent is None:
         return {}
     if not isinstance(agent, dict):
-        logger.warning(f'警告: personas.json の「<設定値>」の agent はオブジェクト（{{ }}）で書いてください。既定の文面を使います。')
+        logger.warning('警告: personas.json の「<設定値>」の agent はオブジェクト（{ }）で書いてください。既定の文面を使います。')
         return {}
     lines: dict[str, str] = {}
     for key, value in agent.items():

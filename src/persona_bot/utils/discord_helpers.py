@@ -157,7 +157,6 @@ async def fetch_channel_history_text(
     # 最新の発言が履歴に入らなくなるため。
     after = discord.Object(id=reset_message_id) if reset_message_id else None
     history_messages: list[discord.Message] = []
-    channel_id = getattr(channel, "id", "不明")
     try:
         async for history_message in channel.history(limit=limit, after=after, oldest_first=False):
             if exclude_message_id is not None and history_message.id == exclude_message_id:
@@ -167,7 +166,7 @@ async def fetch_channel_history_text(
     # Forbidden は HTTPException の派生クラスなので、必ず先に捕まえること
     # （順序を逆にすると権限エラーが一時障害として扱われ、原因がログから消える）。
     except discord.Forbidden:
-        logger.error(f'履歴の取得権限がありません（チャンネルID: <ID>）。「メッセージ履歴を読む」権限を確認してください。履歴なしで応答します。', exc_info=True)
+        logger.error('履歴の取得権限がありません（チャンネルID: <ID>）。「メッセージ履歴を読む」権限を確認してください。履歴なしで応答します。', exc_info=True)
         return ""
     except discord.HTTPException as error:
         logger.error(f'履歴の取得に失敗しました（チャンネルID: <ID>）。履歴なしで応答します: {type(error).__name__}', exc_info=error)
@@ -481,7 +480,7 @@ async def post_welcome_message(
 
     channel = pick_announcement_channel(guild)
     if channel is None:
-        logger.info(f'ウェルカムメッセージを投稿できるチャンネルが見つかりませんでした（guild=<ID>）。')
+        logger.info('ウェルカムメッセージを投稿できるチャンネルが見つかりませんでした（guild=<ID>）。')
         return False
 
     # 送信を待つ前に「投稿済み」を立てる。ここから送信までの間に await を
@@ -493,13 +492,13 @@ async def post_welcome_message(
         await channel.send(body, allowed_mentions=discord.AllowedMentions.none())
     # Forbidden は HTTPException の派生クラスなので、必ず先に捕まえること。
     except discord.Forbidden:
-        logger.error(f'ウェルカムメッセージの送信を拒否されました（guild=<ID> / channel=<ID>）。', exc_info=True)
+        logger.error('ウェルカムメッセージの送信を拒否されました（guild=<ID> / channel=<ID>）。', exc_info=True)
         return False
     except discord.HTTPException as error:
         logger.error(f'ウェルカムメッセージの送信に失敗しました（guild=<ID>）: {type(error).__name__}', exc_info=error)
         return False
 
-    logger.info(f'ウェルカムメッセージを投稿しました（guild=<ID> / channel=<ID>）。')
+    logger.info('ウェルカムメッセージを投稿しました（guild=<ID> / channel=<ID>）。')
     return True
 
 

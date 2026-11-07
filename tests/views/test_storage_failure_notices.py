@@ -10,7 +10,9 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from tests.helpers.discord_mocks import make_interaction as make_discord_interaction, make_response
 from persona_bot.core.database import Database
 from persona_bot.services.reminder_service import ReminderService, ReminderStorageError
 from persona_bot.services.stats_service import StatsService
@@ -21,12 +23,7 @@ from persona_bot.views.view_parts import PanelView
 
 
 def make_interaction():
-    return SimpleNamespace(
-        user=SimpleNamespace(id=11), extras={},
-        response=SimpleNamespace(defer=AsyncMock()),
-        edit_original_response=AsyncMock(), original_response=AsyncMock(),
-        followup=SimpleNamespace(send=AsyncMock()),
-    )
+    return make_discord_interaction(user_id=11, extras={}, response=make_response("defer"))
 
 
 class StorageFailureNoticeTests(unittest.IsolatedAsyncioTestCase):

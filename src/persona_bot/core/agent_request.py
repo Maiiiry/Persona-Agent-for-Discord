@@ -37,7 +37,7 @@ async def handle_agent_request(
     catalog = current_persona_catalog()
     lines = catalog.agent_lines(response_settings.prompt_file)
     if not self.agent.try_acquire(user_id):
-        logger.info(f'サブエージェント: 実行中の依頼があるため受け付けませんでした (user_id=<ID>)。')
+        logger.info('サブエージェント: 実行中の依頼があるため受け付けませんでした (user_id=<ID>)。')
         try:
             await message.reply(render_agent_line(lines, "busy"), allowed_mentions=discord.AllowedMentions.none())
         except discord.DiscordException as error:

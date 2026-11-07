@@ -35,6 +35,7 @@ from persona_bot.views import stats_view
 from persona_bot.views import summary_view
 from persona_bot.views import unblock_view
 from persona_bot.views import view_parts
+from tests.helpers.discord_mocks import make_channel, make_interaction as make_discord_interaction, make_message
 from tests.helpers.member_helpers import make_member
 
 
@@ -66,15 +67,8 @@ class ChannelDisplayNameTests(unittest.TestCase):
 
 
 def make_interaction(*, user=None):
-    return SimpleNamespace(
-        user=user,
-        response=SimpleNamespace(
-            defer=AsyncMock(), send_message=AsyncMock(), edit_message=AsyncMock(),
-            is_done=Mock(return_value=False),
-        ),
-        followup=SimpleNamespace(send=AsyncMock()),
-        edit_original_response=AsyncMock(), original_response=AsyncMock(),
-    )
+    # user を省略したテストは、従来どおり `interaction.user` が None の Interaction を使う。
+    return make_discord_interaction(user=user)
 
 
 
@@ -102,8 +96,8 @@ class LongMessageTests(unittest.IsolatedAsyncioTestCase):
         for text in ("", " \n\t", "\n" * 4001, "あ" * 2000 + "\n   "):
             with self.subTest(text=repr(text[:10])):
                 first = object()
-                channel = SimpleNamespace(send=AsyncMock())
-                message = SimpleNamespace(reply=AsyncMock(return_value=first), channel=channel)
+                channel = make_channel()
+                message = make_message(channel=channel, reply=AsyncMock(return_value=first))
                 result = await send_long_reply(message, text)
                 channel.send.assert_not_awaited()
                 if text.strip():
@@ -124,8 +118,8 @@ class LongMessageTests(unittest.IsolatedAsyncioTestCase):
         for chunks in (["\n ", "  架空の先頭\n", "\t", "\n架空の続き  ", " "], [" ", "\n"], []):
             with self.subTest(chunks=chunks):
                 first = object()
-                channel = SimpleNamespace(send=AsyncMock())
-                message = SimpleNamespace(reply=AsyncMock(return_value=first), channel=channel)
+                channel = make_channel()
+                message = make_message(channel=channel, reply=AsyncMock(return_value=first))
                 valid = [chunk for chunk in chunks if chunk.strip()]
                 with patch.object(discord_helpers, "split_message", return_value=chunks):
                     result = await send_long_reply(message, "架空の本文", suppress_embeds=True)
@@ -146,7 +140,7 @@ class LongMessageTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(call.kwargs, {"suppress_embeds": True, "allowed_mentions": mentions})
 
     async def test_long_message_propagates_options_to_every_chunk(self) -> None:
-        channel = SimpleNamespace(send=AsyncMock())
+        channel = make_channel()
         mentions = discord.AllowedMentions.none()
         await send_long_message(channel, "あ" * 4001, suppress_embeds=True, allowed_mentions=mentions)
         self.assertEqual([len(call.args[0]) for call in channel.send.call_args_list], [2000, 2000, 1])
@@ -155,7 +149,7 @@ class LongMessageTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reply_returns_first_message_and_sends_remaining_chunks_in_order(self) -> None:
         first = object()
-        message = SimpleNamespace(reply=AsyncMock(return_value=first), channel=SimpleNamespace(send=AsyncMock()))
+        message = make_message(reply=AsyncMock(return_value=first))
         result = await send_long_reply(message, "あ" * 4001, suppress_embeds=True)
         self.assertIs(result, first)
         message.reply.assert_awaited_once_with("あ" * 2000, suppress_embeds=True, allowed_mentions=REPLY_ALLOWED_MENTIONS)
@@ -164,7 +158,7 @@ class LongMessageTests(unittest.IsolatedAsyncioTestCase):
     async def test_reply_restricts_mentions_in_every_chunk_except_replied_user(self) -> None:
         # AI の本文に全体・ロール・第三者のメンションが混ざっても、通知は返信先本人だけに限る。
         text = "@everyone @here <@&22> <@33> " + "あ" * 4001
-        message = SimpleNamespace(reply=AsyncMock(return_value=object()), channel=SimpleNamespace(send=AsyncMock()))
+        message = make_message(reply=AsyncMock(return_value=object()))
         await send_long_reply(message, text)
         calls = [message.reply.await_args, *message.channel.send.await_args_list]
         self.assertGreater(len(calls), 1)
@@ -201,7 +195,7 @@ class LongMessageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(call.kwargs["allowed_mentions"].to_dict(), {"users": [11], "parse": []})
 
     async def test_reminder_keeps_mention_next_date_and_chunk_limits(self) -> None:
-        channel = SimpleNamespace(send=AsyncMock())
+        channel = make_channel()
         db = SimpleNamespace(reminder_is_pending=Mock(return_value=True))
         service = ReminderService(SimpleNamespace(get_channel=Mock(return_value=channel)), db, make_filter())
         with patch.object(reminder_service, "send_long_message", wraps=send_long_message) as sending:
@@ -219,7 +213,7 @@ class LongMessageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(call.kwargs["allowed_mentions"].to_dict(), {"users": [11], "parse": []})
 
     async def test_reminder_body_cannot_ping_everyone_roles_or_other_users(self) -> None:
-        channel = SimpleNamespace(send=AsyncMock())
+        channel = make_channel()
         db = SimpleNamespace(reminder_is_pending=Mock(return_value=True))
         service = ReminderService(SimpleNamespace(get_channel=Mock(return_value=channel)), db, make_filter())
         await service._notify({
@@ -396,7 +390,7 @@ class SharedMaskTests(unittest.IsolatedAsyncioTestCase):
         auto = AutoTopicService(None, None, None, None, moderator, ng_filter, None, None)
         autonomous = AutonomousService.__new__(AutonomousService)
         autonomous._ng_filter = ng_filter
-        channel = SimpleNamespace(send=AsyncMock())
+        channel = make_channel()
         reminder = ReminderService(SimpleNamespace(get_channel=Mock(return_value=channel)), None, ng_filter)
         with patch.object(ng_filter, "mask_with_log", wraps=ng_filter.mask_with_log) as masking, \
                 self.assertLogs("persona_bot.services.ng_word_service", level="WARNING") as logging:
