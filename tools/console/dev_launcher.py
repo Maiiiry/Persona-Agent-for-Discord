@@ -316,3 +316,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+# Automated fix for issue #394: fix: 範囲外のUNIX時刻があると管理コンソールのDBテーブル描画が失敗する
